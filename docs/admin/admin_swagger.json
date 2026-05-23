@@ -1,0 +1,19 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "平台管理员接口文档",
+        "title": "平台管理后台 API",
+        "contact": {},
+        "version": "1.0"
+    },
+    "host": "localhost:8083",
+    "basePath": "/",
+    "paths": {},
+    "securityDefinitions": {
+        "BearerAuth": {
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header"
+        }
+    }
+}

@@ -1,0 +1,12 @@
+# Railway 部署 - 数据库迁移 Job（一次性运行后退出）
+# 在 Railway 中创建为独立 Service，设置 Restart Policy = Never
+FROM migrate/migrate:latest
+
+COPY ./migrations /migrations
+
+# 启动命令由 Railway Service 的 Start Command 覆盖，格式：
+# migrate -path /migrations -database "$DATABASE_URL" up
+# 其中 DATABASE_URL 由 Railway 自动注入（格式：postgres://user:pass@host:port/dbname?sslmode=require）
+# 使用 shell 形式确保 $DATABASE_URL 环境变量被正确展开
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["migrate -path /migrations -database $DATABASE_URL up"]

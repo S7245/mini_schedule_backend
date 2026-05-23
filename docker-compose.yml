@@ -1,0 +1,107 @@
+version: "3.8"
+
+services:
+  # PostgreSQL 数据库
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mini_schedule
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # 数据库迁移（一次性容器）
+  migrate:
+    image: migrate/migrate
+    volumes:
+      - ./migrations:/migrations
+    command: [
+      "-path", "/migrations",
+      "-database", "postgres://postgres:postgres@postgres:5432/mini_schedule?sslmode=disable",
+      "up"
+    ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 品牌商家后台
+  api-brand:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: api-brand
+    ports:
+      - "8081:8080"
+    environment:
+      - MINI_SCHEDULE_DATABASE_HOST=postgres
+      - MINI_SCHEDULE_DATABASE_PORT=5432
+      - MINI_SCHEDULE_REDIS_ADDR=redis:6379
+      - MINI_SCHEDULE_SERVER_PORT=8080
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  # C 端用户 API
+  api-app:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: api-app
+    ports:
+      - "8082:8080"
+    environment:
+      - MINI_SCHEDULE_DATABASE_HOST=postgres
+      - MINI_SCHEDULE_DATABASE_PORT=5432
+      - MINI_SCHEDULE_REDIS_ADDR=redis:6379
+      - MINI_SCHEDULE_SERVER_PORT=8080
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  # 平台管理后台
+  api-admin:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: api-admin
+    ports:
+      - "8083:8080"
+    environment:
+      - MINI_SCHEDULE_DATABASE_HOST=postgres
+      - MINI_SCHEDULE_DATABASE_PORT=5432
+      - MINI_SCHEDULE_REDIS_ADDR=redis:6379
+      - MINI_SCHEDULE_SERVER_PORT=8080
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:

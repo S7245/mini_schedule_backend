@@ -1,0 +1,14 @@
+basePath: /
+host: localhost:8083
+info:
+  contact: {}
+  description: 平台管理员接口文档
+  title: 平台管理后台 API
+  version: "1.0"
+paths: {}
+securityDefinitions:
+  BearerAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

@@ -1,0 +1,33 @@
+# Railway 部署 - C 端用户 API（api-app，端口 8082）
+# 构建阶段
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /app
+
+RUN apk add --no-cache git
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -o /app/server ./cmd/api-app/
+
+# 运行阶段
+FROM alpine:3.19
+
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates tzdata
+
+COPY --from=builder /app/server /app/server
+COPY --from=builder /app/configs /app/configs
+COPY --from=builder /app/migrations /app/migrations
+
+RUN addgroup -g 1001 appgroup && \
+    adduser -D -u 1001 -G appgroup appuser
+USER appuser
+
+EXPOSE 8080
+
+ENTRYPOINT ["/app/server"]

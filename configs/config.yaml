@@ -1,0 +1,49 @@
+# 应用配置
+app:
+  name: "mini-schedule"
+  env: "development"  # development / staging / production
+  debug: true
+
+# 服务器配置（三端共享基础配置，各自覆盖端口）
+server:
+  port: 8081
+  read_timeout: 10s
+  write_timeout: 10s
+  idle_timeout: 30s
+
+# 数据库配置
+database:
+  host: "127.0.0.1"
+  port: 5432
+  user: "liushan"
+  password: ""
+  dbname: "mini_schedule"
+  ssl_mode: "disable"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: 5m
+  log_level: "warn"  # silent / error / warn / info
+
+# Redis 配置
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+  pool_size: 10
+  min_idle_conns: 5
+
+# JWT 配置
+jwt:
+  secret: "change-me-in-production"
+  expire: 24h
+  refresh_expire: 168h
+
+# 日志配置
+log:
+  level: "debug"  # debug / info / warn / error
+  format: "text"  # text / json
+
+# 分页默认值
+pagination:
+  default_page_size: 20
+  max_page_size: 100

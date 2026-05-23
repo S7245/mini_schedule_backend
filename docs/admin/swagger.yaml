@@ -1,0 +1,334 @@
+basePath: /
+definitions:
+  admin.AdminUserInfo:
+    properties:
+      id:
+        type: integer
+      role:
+        type: string
+      username:
+        type: string
+    type: object
+  admin.CreateAdminRequest:
+    properties:
+      password:
+        minLength: 6
+        type: string
+      role:
+        enum:
+        - super_admin
+        - operator
+        - support
+        type: string
+      username:
+        maxLength: 50
+        minLength: 3
+        type: string
+    required:
+    - password
+    - role
+    - username
+    type: object
+  admin.CreateBrandRequest:
+    properties:
+      contact_name:
+        minLength: 2
+        type: string
+      contact_phone:
+        type: string
+      logo_url:
+        type: string
+      name:
+        maxLength: 100
+        minLength: 2
+        type: string
+    required:
+    - contact_name
+    - contact_phone
+    - name
+    type: object
+  admin.LoginRequest:
+    properties:
+      password:
+        type: string
+      username:
+        type: string
+    required:
+    - password
+    - username
+    type: object
+  admin.LoginResponse:
+    properties:
+      access_token:
+        type: string
+      refresh_token:
+        type: string
+      user:
+        $ref: '#/definitions/admin.AdminUserInfo'
+    type: object
+  admin.UpdateBrandRequest:
+    properties:
+      contact_name:
+        minLength: 2
+        type: string
+      logo_url:
+        type: string
+      name:
+        maxLength: 100
+        minLength: 2
+        type: string
+    type: object
+  admin.UpdateBrandStatusRequest:
+    properties:
+      status:
+        example: active
+        type: string
+    type: object
+  response.Response:
+    properties:
+      code:
+        type: string
+      data: {}
+      message:
+        type: string
+    type: object
+host: localhost:8083
+info:
+  contact: {}
+  description: 平台管理员接口文档
+  title: 平台管理后台 API
+  version: "1.0"
+paths:
+  /api/v1/admin/admins:
+    get:
+      description: 分页获取管理员列表
+      parameters:
+      - default: 1
+        description: 页码
+        in: query
+        name: page
+        type: integer
+      - default: 20
+        description: 每页数量
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            $ref: '#/definitions/response.Response'
+      security:
+      - BearerAuth: []
+      summary: 管理员列表
+      tags:
+      - 管理员管理
+    post:
+      consumes:
+      - application/json
+      description: 创建平台管理员账号
+      parameters:
+      - description: 管理员信息
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/admin.CreateAdminRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            $ref: '#/definitions/response.Response'
+      security:
+      - BearerAuth: []
+      summary: 创建管理员
+      tags:
+      - 管理员管理
+  /api/v1/admin/brands:
+    get:
+      description: 分页获取品牌列表
+      parameters:
+      - default: 1
+        description: 页码
+        in: query
+        name: page
+        type: integer
+      - default: 20
+        description: 每页数量
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            $ref: '#/definitions/response.Response'
+        "401":
+          description: 未认证
+          schema:
+            $ref: '#/definitions/response.Response'
+      security:
+      - BearerAuth: []
+      summary: 品牌列表
+      tags:
+      - 品牌管理
+    post:
+      consumes:
+      - application/json
+      description: 创建新品牌入驻
+      parameters:
+      - description: 品牌信息
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/admin.CreateBrandRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            $ref: '#/definitions/response.Response'
+        "400":
+          description: 参数错误
+          schema:
+            $ref: '#/definitions/response.Response'
+        "401":
+          description: 未认证
+          schema:
+            $ref: '#/definitions/response.Response'
+      security:
+      - BearerAuth: []
+      summary: 创建品牌
+      tags:
+      - 品牌管理
+  /api/v1/admin/brands/{id}:
+    get:
+      description: 获取单个品牌详情
+      parameters:
+      - description: 品牌 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            $ref: '#/definitions/response.Response'
+        "404":
+          description: 品牌不存在
+          schema:
+            $ref: '#/definitions/response.Response'
+      security:
+      - BearerAuth: []
+      summary: 品牌详情
+      tags:
+      - 品牌管理
+    put:
+      consumes:
+      - application/json
+      description: 更新品牌信息
+      parameters:
+      - description: 品牌 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 品牌信息
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/admin.UpdateBrandRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            $ref: '#/definitions/response.Response'
+      security:
+      - BearerAuth: []
+      summary: 更新品牌
+      tags:
+      - 品牌管理
+  /api/v1/admin/brands/{id}/status:
+    patch:
+      consumes:
+      - application/json
+      description: 启用/禁用/待审核品牌
+      parameters:
+      - description: 品牌 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 状态
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/admin.UpdateBrandStatusRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            $ref: '#/definitions/response.Response'
+      security:
+      - BearerAuth: []
+      summary: 更新品牌状态
+      tags:
+      - 品牌管理
+  /api/v1/admin/login:
+    post:
+      consumes:
+      - application/json
+      description: 使用用户名和密码登录管理后台
+      parameters:
+      - description: 登录信息
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/admin.LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/admin.LoginResponse'
+              type: object
+        "400":
+          description: 参数错误
+          schema:
+            $ref: '#/definitions/response.Response'
+        "401":
+          description: 认证失败
+          schema:
+            $ref: '#/definitions/response.Response'
+      summary: 管理员登录
+      tags:
+      - 认证
+securityDefinitions:
+  BearerAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
