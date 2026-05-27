@@ -45,3 +45,18 @@ log:
 pagination:
   default_page_size: 20
   max_page_size: 100
+
+sms:
+  provider: "mock"
+  mock_code: "123456"
+  allow_mock: true
+  expire_minutes: 5
+
+payment:
+  wechat:
+    app_id: ""
+    mch_id: ""
+    api_v3_key: ""
+    serial_no: ""
+    private_key_path: ""
+    notify_url: ""

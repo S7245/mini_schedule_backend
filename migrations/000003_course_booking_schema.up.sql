@@ -88,7 +88,9 @@ CREATE TABLE IF NOT EXISTS saas_plan_orders (
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     brand_id              BIGINT NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+    brand_user_id         BIGINT REFERENCES brand_users(id) ON DELETE SET NULL,
     plan_id               BIGINT NOT NULL REFERENCES saas_plans(id) ON DELETE RESTRICT,
+    source                VARCHAR(40) NOT NULL DEFAULT 'public_signup_first_purchase',
     billing_cycle         VARCHAR(20) NOT NULL,
     amount                NUMERIC(12, 2) NOT NULL,
     currency              CHAR(3) NOT NULL DEFAULT 'CNY',
@@ -96,9 +98,23 @@ CREATE TABLE IF NOT EXISTS saas_plan_orders (
     status                VARCHAR(30) NOT NULL DEFAULT 'pending_payment',
     out_trade_no          VARCHAR(100) NOT NULL,
     third_party_trade_no  VARCHAR(100),
+    wechat_code_url       VARCHAR(500),
+    wechat_prepay_id      VARCHAR(100),
+    payment_request_payload JSONB,
+    payment_response_payload JSONB,
+    payment_expires_at    TIMESTAMPTZ,
     paid_at               TIMESTAMPTZ,
     closed_at             TIMESTAMPTZ,
     failure_reason        VARCHAR(500),
+    CONSTRAINT saas_plan_orders_source_valid CHECK (
+        source IN (
+            'public_signup_first_purchase',
+            'admin_manual_compensation',
+            'brand_self_service_renewal',
+            'brand_self_service_upgrade',
+            'brand_self_service_downgrade'
+        )
+    ),
     CONSTRAINT saas_plan_orders_billing_cycle_valid CHECK (billing_cycle IN ('monthly', 'yearly')),
     CONSTRAINT saas_plan_orders_amount_non_negative CHECK (amount >= 0),
     CONSTRAINT saas_plan_orders_payment_channel_valid CHECK (payment_channel IN ('wechat', 'alipay')),
@@ -107,7 +123,9 @@ CREATE TABLE IF NOT EXISTS saas_plan_orders (
     )
 );
 CREATE INDEX IF NOT EXISTS idx_saas_plan_orders_brand_id ON saas_plan_orders(brand_id);
+CREATE INDEX IF NOT EXISTS idx_saas_plan_orders_brand_user_id ON saas_plan_orders(brand_user_id);
 CREATE INDEX IF NOT EXISTS idx_saas_plan_orders_plan_id ON saas_plan_orders(plan_id);
+CREATE INDEX IF NOT EXISTS idx_saas_plan_orders_source_status ON saas_plan_orders(source, status);
 CREATE INDEX IF NOT EXISTS idx_saas_plan_orders_status_created_at ON saas_plan_orders(status, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_saas_plan_orders_out_trade_no ON saas_plan_orders(out_trade_no);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_saas_plan_orders_third_party_trade_no
@@ -176,6 +194,9 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
     currency             CHAR(3) NOT NULL DEFAULT 'CNY',
     out_trade_no         VARCHAR(100) NOT NULL,
     third_party_trade_no VARCHAR(100),
+    provider_request_id  VARCHAR(100),
+    request_payload      JSONB,
+    response_payload     JSONB,
     callback_payload     JSONB,
     callback_received_at TIMESTAMPTZ,
     paid_at              TIMESTAMPTZ,
@@ -190,6 +211,9 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
 CREATE INDEX IF NOT EXISTS idx_payment_transactions_brand_id ON payment_transactions(brand_id);
 CREATE INDEX IF NOT EXISTS idx_payment_transactions_order_id ON payment_transactions(order_id);
 CREATE INDEX IF NOT EXISTS idx_payment_transactions_status_created_at ON payment_transactions(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_provider_request_id
+    ON payment_transactions(provider_request_id)
+    WHERE provider_request_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_transactions_channel_trade_type
     ON payment_transactions(payment_channel, out_trade_no, transaction_type);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_transactions_third_party_trade_no
@@ -207,6 +231,8 @@ CREATE TABLE IF NOT EXISTS payment_callback_logs (
     third_party_trade_no VARCHAR(100),
     callback_request_id  VARCHAR(100),
     status               VARCHAR(30) NOT NULL DEFAULT 'received',
+    headers              JSONB NOT NULL DEFAULT '{}'::JSONB,
+    raw_body             TEXT,
     payload              JSONB NOT NULL DEFAULT '{}'::JSONB,
     processed_at         TIMESTAMPTZ,
     error_message        VARCHAR(1000),

@@ -9,11 +9,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
-	"gorm.io/gorm"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
+	"gorm.io/gorm"
 
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
+	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
@@ -46,9 +47,11 @@ func initializeAdminApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		cache.NewService,
 
 		persistence.NewBrandRepository,
+		persistence.NewCommercialRepository,
 		persistence.NewAdminUserRepository,
 
 		brand.NewService,
+		commercial.NewService,
 		user.NewAdminUserService,
 
 		adminHandler.NewHandler,
@@ -72,12 +75,16 @@ func newAdminRouter(
 
 	r := gin.New()
 	r.Use(middleware.CORS(cfg.CORS))
+	r.Use(middleware.Locale())
 	r.Use(gin.Recovery())
 
 	// Swagger UI（仅 debug 模式）
 	if cfg.App.Debug {
 		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	}
+
+	publicAPI := r.Group("/api/v1/public")
+	h.RegisterPublicRoutes(publicAPI)
 
 	api := r.Group("/api/v1/admin")
 	h.RegisterRoutes(api)

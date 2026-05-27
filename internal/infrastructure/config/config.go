@@ -19,6 +19,8 @@ type Config struct {
 	CORS       CORSConfig       `mapstructure:"cors"`
 	Log        LogConfig        `mapstructure:"log"`
 	Pagination PaginationConfig `mapstructure:"pagination"`
+	SMS        SMSConfig        `mapstructure:"sms"`
+	Payment    PaymentConfig    `mapstructure:"payment"`
 }
 
 type AppConfig struct {
@@ -91,6 +93,26 @@ type PaginationConfig struct {
 	MaxPageSize     int `mapstructure:"max_page_size"`
 }
 
+type SMSConfig struct {
+	Provider      string `mapstructure:"provider"`
+	MockCode      string `mapstructure:"mock_code"`
+	AllowMock     bool   `mapstructure:"allow_mock"`
+	ExpireMinutes int    `mapstructure:"expire_minutes"`
+}
+
+type PaymentConfig struct {
+	WeChat WeChatPayConfig `mapstructure:"wechat"`
+}
+
+type WeChatPayConfig struct {
+	AppID          string `mapstructure:"app_id"`
+	MchID          string `mapstructure:"mch_id"`
+	APIV3Key       string `mapstructure:"api_v3_key"`
+	SerialNo       string `mapstructure:"serial_no"`
+	PrivateKeyPath string `mapstructure:"private_key_path"`
+	NotifyURL      string `mapstructure:"notify_url"`
+}
+
 // Load 加载配置，支持配置文件 + 环境变量覆盖
 // 环境变量优先级高于配置文件，命名规则：MINI_SCHEDULE_DATABASE_HOST → database.host
 func Load(configPath string) (*Config, error) {
@@ -113,6 +135,9 @@ func Load(configPath string) (*Config, error) {
 		"jwt.secret", "jwt.expire", "jwt.refresh_expire",
 		"app.env", "app.debug",
 		"log.level", "log.format",
+		"sms.provider", "sms.mock_code", "sms.allow_mock", "sms.expire_minutes",
+		"payment.wechat.app_id", "payment.wechat.mch_id", "payment.wechat.api_v3_key",
+		"payment.wechat.serial_no", "payment.wechat.private_key_path", "payment.wechat.notify_url",
 	}
 	for _, key := range keysToBind {
 		_ = v.BindEnv(key)

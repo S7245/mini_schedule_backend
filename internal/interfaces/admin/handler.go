@@ -5,36 +5,40 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-playground/validator/v10"
 
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
+	commercialapp "github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	branddomain "github.com/zkw/mini-schedule/backend/internal/domain/brand"
 	domainuser "github.com/zkw/mini-schedule/backend/internal/domain/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 	"github.com/zkw/mini-schedule/backend/pkg/response"
+	"github.com/zkw/mini-schedule/backend/pkg/validation"
 )
 
 // Handler 平台管理后台 Handler
 type Handler struct {
-	brandSvc     *brand.Service
-	adminUserSvc *user.AdminUserService
-	jwtSvc       *cache.Service
-	validator    *validator.Validate
+	brandSvc      *brand.Service
+	commercialSvc *commercialapp.Service
+	adminUserSvc  *user.AdminUserService
+	jwtSvc        *cache.Service
+	validator     *validation.Validator
 }
 
 // NewHandler 创建管理端 Handler
 func NewHandler(
 	brandSvc *brand.Service,
+	commercialSvc *commercialapp.Service,
 	adminUserSvc *user.AdminUserService,
 	jwtSvc *cache.Service,
 ) *Handler {
 	return &Handler{
-		brandSvc:     brandSvc,
-		adminUserSvc: adminUserSvc,
-		jwtSvc:       jwtSvc,
-		validator:    validator.New(),
+		brandSvc:      brandSvc,
+		commercialSvc: commercialSvc,
+		adminUserSvc:  adminUserSvc,
+		jwtSvc:        jwtSvc,
+		validator:     validation.New(),
 	}
 }
 
@@ -149,6 +153,8 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		// @Success 200 {object} response.Response{data=response.PageData} "成功"
 		// @Router /api/v1/admin/admins [get]
 		auth.GET("/admins", h.listAdmins)
+
+		h.registerCommercialRoutes(auth)
 	}
 }
 
@@ -240,7 +246,7 @@ func (h *Handler) login(c *gin.Context) {
 	}
 
 	if err := h.validator.Struct(req); err != nil {
-		response.Error(c, response.ErrInvalidRequest(err.Error()))
+		response.Error(c, h.validator.InvalidRequest(c, err))
 		return
 	}
 
@@ -298,7 +304,7 @@ func (h *Handler) createBrand(c *gin.Context) {
 	}
 
 	if err := h.validator.Struct(req); err != nil {
-		response.Error(c, response.ErrInvalidRequest(err.Error()))
+		response.Error(c, h.validator.InvalidRequest(c, err))
 		return
 	}
 
@@ -366,7 +372,7 @@ func (h *Handler) updateBrand(c *gin.Context) {
 	}
 
 	if err := h.validator.Struct(req); err != nil {
-		response.Error(c, response.ErrInvalidRequest(err.Error()))
+		response.Error(c, h.validator.InvalidRequest(c, err))
 		return
 	}
 
@@ -421,7 +427,7 @@ func (h *Handler) createAdmin(c *gin.Context) {
 	}
 
 	if err := h.validator.Struct(req); err != nil {
-		response.Error(c, response.ErrInvalidRequest(err.Error()))
+		response.Error(c, h.validator.InvalidRequest(c, err))
 		return
 	}
 
