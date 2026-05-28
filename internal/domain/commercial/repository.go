@@ -35,6 +35,45 @@ type UpdateSaaSPlanInput struct {
 	Features          *[]SaaSPlanFeatureInput
 }
 
+type CreatePublicSignupOrderInput struct {
+	Phone          string
+	SMSCode        string
+	Password       string
+	BrandName      string
+	LogoURL        string
+	ContactName    string
+	ContactEmail   string
+	IndustryType   string
+	PlanID         int64
+	BillingCycle   BillingCycle
+	PaymentChannel PaymentChannel
+}
+
+type CreatePublicSignupOrderRecordInput struct {
+	Phone          string
+	PasswordHash   string
+	BrandName      string
+	LogoURL        string
+	ContactName    string
+	ContactEmail   string
+	IndustryType   string
+	PlanID         int64
+	BillingCycle   BillingCycle
+	PaymentChannel PaymentChannel
+	OutTradeNo     string
+}
+
+type PublicSignupOrderResult struct {
+	BrandID         int64          `json:"brand_id"`
+	BrandName       string         `json:"brand_name"`
+	BrandStatus     string         `json:"brand_status"`
+	BrandUserID     int64          `json:"brand_user_id"`
+	BrandUserPhone  string         `json:"brand_user_phone"`
+	BrandUserStatus string         `json:"brand_user_status"`
+	Plan            *SaaSPlan      `json:"plan"`
+	Order           *SaaSPlanOrder `json:"order"`
+}
+
 type ListSaaSPlanOrdersFilter struct {
 	Status         SaaSPlanOrderStatus
 	PaymentChannel PaymentChannel
@@ -104,6 +143,7 @@ type Repository interface {
 	ListPublicSaaSPlans(ctx context.Context) ([]*SaaSPlan, error)
 	UpdateSaaSPlan(ctx context.Context, id int64, input UpdateSaaSPlanInput) (*SaaSPlan, error)
 	UpdateSaaSPlanStatus(ctx context.Context, id int64, status SaaSPlanStatus) error
+	CreatePublicSignupOrder(ctx context.Context, input CreatePublicSignupOrderRecordInput) (*PublicSignupOrderResult, error)
 
 	ListSaaSPlanOrders(ctx context.Context, offset, limit int, filter ListSaaSPlanOrdersFilter) ([]*SaaSPlanOrder, int64, error)
 	GetBrandSubscription(ctx context.Context, id int64) (*BrandSubscription, error)

@@ -62,9 +62,24 @@ type updateBrandSubscriptionStatusRequest struct {
 	Reason       string `json:"reason" validate:"required,max=1000"`
 }
 
+type createPublicSignupOrderRequest struct {
+	Phone          string `json:"phone" validate:"required"`
+	SMSCode        string `json:"sms_code" validate:"required"`
+	Password       string `json:"password" validate:"required,min=6,max=64"`
+	BrandName      string `json:"brand_name" validate:"required,min=2,max=100"`
+	LogoURL        string `json:"logo_url" validate:"omitempty,url"`
+	ContactName    string `json:"contact_name" validate:"required,min=2,max=50"`
+	ContactEmail   string `json:"contact_email" validate:"omitempty,email,max=100"`
+	IndustryType   string `json:"industry_type" validate:"omitempty,max=50"`
+	PlanID         int64  `json:"plan_id" validate:"required,gt=0"`
+	BillingCycle   string `json:"billing_cycle" validate:"required,oneof=monthly yearly"`
+	PaymentChannel string `json:"payment_channel" validate:"omitempty,oneof=wechat alipay"`
+}
+
 func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
 	r.GET("/saas-plans", h.listPublicSaaSPlans)
 	r.POST("/signup/sms-code", h.requestSignupSMSCode)
+	r.POST("/signup/orders", h.createPublicSignupOrder)
 }
 
 func (h *Handler) registerCommercialRoutes(r *gin.RouterGroup) {
@@ -112,6 +127,37 @@ func (h *Handler) requestSignupSMSCode(c *gin.Context) {
 		return
 	}
 	response.SuccessNoData(c)
+}
+
+func (h *Handler) createPublicSignupOrder(c *gin.Context) {
+	var req createPublicSignupOrderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
+		return
+	}
+	if err := h.validator.Struct(req); err != nil {
+		response.Error(c, h.validator.InvalidRequest(c, err))
+		return
+	}
+
+	result, err := h.commercialSvc.CreatePublicSignupOrder(c.Request.Context(), commercial.CreatePublicSignupOrderInput{
+		Phone:          req.Phone,
+		SMSCode:        req.SMSCode,
+		Password:       req.Password,
+		BrandName:      req.BrandName,
+		LogoURL:        req.LogoURL,
+		ContactName:    req.ContactName,
+		ContactEmail:   req.ContactEmail,
+		IndustryType:   req.IndustryType,
+		PlanID:         req.PlanID,
+		BillingCycle:   commercial.BillingCycle(req.BillingCycle),
+		PaymentChannel: commercial.PaymentChannel(req.PaymentChannel),
+	})
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, result)
 }
 
 func (h *Handler) listSaaSPlans(c *gin.Context) {

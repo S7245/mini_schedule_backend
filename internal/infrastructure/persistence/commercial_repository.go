@@ -8,6 +8,7 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/domain/commercial"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type commercialRepository struct {
@@ -164,6 +165,106 @@ func (r *commercialRepository) UpdateSaaSPlanStatus(ctx context.Context, id int6
 		return apperr.ErrNotFoundF(apperr.ErrNotFound, "SaaS 套餐不存在")
 	}
 	return nil
+}
+
+func (r *commercialRepository) CreatePublicSignupOrder(ctx context.Context, input commercial.CreatePublicSignupOrderRecordInput) (*commercial.PublicSignupOrderResult, error) {
+	var result *commercial.PublicSignupOrderResult
+
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var plan SaaSPlanModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Preload("Features").
+			Where("id = ? AND status = ?", input.PlanID, string(commercial.SaaSPlanStatusActive)).
+			First(&plan).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return apperr.ErrNotFoundF(apperr.ErrNotFound, "SaaS 套餐不存在或已下架")
+			}
+			return apperr.ErrInternalF("查询 SaaS 套餐失败", err)
+		}
+
+		amount, err := amountForBillingCycle(&plan, input.BillingCycle)
+		if err != nil {
+			return err
+		}
+
+		brandModel := BrandModel{
+			Name:         input.BrandName,
+			LogoURL:      input.LogoURL,
+			ContactName:  input.ContactName,
+			ContactPhone: input.Phone,
+			Status:       "pending",
+		}
+		if err := tx.Create(&brandModel).Error; err != nil {
+			if isUniqueViolation(err) {
+				return apperr.NewAppError(apperr.ErrBrandExists, "手机号已注册品牌", 409)
+			}
+			return apperr.ErrInternalF("创建品牌失败", err)
+		}
+		if input.ContactEmail != "" || input.IndustryType != "" {
+			updates := map[string]interface{}{}
+			if input.ContactEmail != "" {
+				updates["contact_email"] = input.ContactEmail
+			}
+			if input.IndustryType != "" {
+				updates["industry_type"] = input.IndustryType
+			}
+			if err := tx.Model(&BrandModel{}).Where("id = ?", brandModel.ID).Updates(updates).Error; err != nil {
+				return apperr.ErrInternalF("更新品牌资料失败", err)
+			}
+		}
+
+		brandUserModel := BrandUserModel{
+			BrandID:      brandModel.ID,
+			Phone:        input.Phone,
+			PasswordHash: input.PasswordHash,
+			Name:         input.ContactName,
+			Status:       "active",
+		}
+		if err := tx.Create(&brandUserModel).Error; err != nil {
+			if isUniqueViolation(err) {
+				return apperr.NewAppError(apperr.ErrUserExists, "手机号已注册", 409)
+			}
+			return apperr.ErrInternalF("创建品牌负责人失败", err)
+		}
+		if err := tx.Exec("UPDATE brand_users SET is_owner = TRUE WHERE id = ?", brandUserModel.ID).Error; err != nil {
+			return apperr.ErrInternalF("标记品牌负责人失败", err)
+		}
+
+		orderModel := SaaSPlanOrderModel{
+			BrandID:        brandModel.ID,
+			BrandUserID:    &brandUserModel.ID,
+			PlanID:         plan.ID,
+			Source:         string(commercial.OrderSourcePublicSignupFirstPurchase),
+			BillingCycle:   string(input.BillingCycle),
+			Amount:         amount,
+			Currency:       plan.Currency,
+			PaymentChannel: string(input.PaymentChannel),
+			Status:         string(commercial.SaaSPlanOrderStatusPendingPayment),
+			OutTradeNo:     input.OutTradeNo,
+		}
+		if err := tx.Create(&orderModel).Error; err != nil {
+			if isUniqueViolation(err) {
+				return apperr.NewAppError(apperr.ErrInvalidRequest, "订单号重复，请重试", 409)
+			}
+			return apperr.ErrInternalF("创建首购订单失败", err)
+		}
+
+		result = &commercial.PublicSignupOrderResult{
+			BrandID:         brandModel.ID,
+			BrandName:       brandModel.Name,
+			BrandStatus:     brandModel.Status,
+			BrandUserID:     brandUserModel.ID,
+			BrandUserPhone:  brandUserModel.Phone,
+			BrandUserStatus: brandUserModel.Status,
+			Plan:            toSaaSPlanDomain(&plan),
+			Order:           toSaaSPlanOrderDomain(&orderModel),
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (r *commercialRepository) ListSaaSPlanOrders(ctx context.Context, offset, limit int, filter commercial.ListSaaSPlanOrdersFilter) ([]*commercial.SaaSPlanOrder, int64, error) {
@@ -558,6 +659,17 @@ func toSaaSPlanDomain(m *SaaSPlanModel) *commercial.SaaSPlan {
 		Features:          features,
 		CreatedAt:         m.CreatedAt,
 		UpdatedAt:         m.UpdatedAt,
+	}
+}
+
+func amountForBillingCycle(plan *SaaSPlanModel, cycle commercial.BillingCycle) (string, error) {
+	switch cycle {
+	case commercial.BillingCycleMonthly:
+		return plan.MonthlyPrice, nil
+	case commercial.BillingCycleYearly:
+		return plan.YearlyPrice, nil
+	default:
+		return "", apperr.ErrBadRequest("计费周期无效")
 	}
 }
 

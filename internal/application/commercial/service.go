@@ -2,10 +2,16 @@ package commercial
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"strings"
+	"time"
 
 	"github.com/zkw/mini-schedule/backend/internal/domain/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Service struct {
@@ -35,6 +41,79 @@ func (s *Service) ListSaaSPlans(ctx context.Context, page, pageSize int, include
 
 func (s *Service) ListPublicSaaSPlans(ctx context.Context) ([]*commercial.SaaSPlan, error) {
 	return s.repo.ListPublicSaaSPlans(ctx)
+}
+
+func (s *Service) CreatePublicSignupOrder(ctx context.Context, input commercial.CreatePublicSignupOrderInput) (*commercial.PublicSignupOrderResult, error) {
+	input.Phone = strings.TrimSpace(input.Phone)
+	input.SMSCode = strings.TrimSpace(input.SMSCode)
+	input.BrandName = strings.TrimSpace(input.BrandName)
+	input.ContactName = strings.TrimSpace(input.ContactName)
+	input.ContactEmail = strings.TrimSpace(input.ContactEmail)
+	input.IndustryType = strings.TrimSpace(input.IndustryType)
+
+	if input.Phone == "" {
+		return nil, apperr.ErrBadRequest("手机号不能为空")
+	}
+	if input.SMSCode == "" {
+		return nil, apperr.ErrBadRequest("短信验证码不能为空")
+	}
+	if input.Password == "" {
+		return nil, apperr.ErrBadRequest("密码不能为空")
+	}
+	if len(input.Password) < 6 || len(input.Password) > 64 {
+		return nil, apperr.ErrBadRequest("密码长度必须为 6-64 位")
+	}
+	if input.BrandName == "" {
+		return nil, apperr.ErrBadRequest("品牌名称不能为空")
+	}
+	if input.ContactName == "" {
+		return nil, apperr.ErrBadRequest("联系人姓名不能为空")
+	}
+	if input.PlanID <= 0 {
+		return nil, apperr.ErrBadRequest("请选择 SaaS 套餐")
+	}
+	if input.BillingCycle == "" {
+		input.BillingCycle = commercial.BillingCycleMonthly
+	}
+	switch input.BillingCycle {
+	case commercial.BillingCycleMonthly, commercial.BillingCycleYearly:
+	default:
+		return nil, apperr.ErrBadRequest("计费周期无效")
+	}
+	if input.PaymentChannel == "" {
+		input.PaymentChannel = commercial.PaymentChannelWeChat
+	}
+	switch input.PaymentChannel {
+	case commercial.PaymentChannelWeChat, commercial.PaymentChannelAlipay:
+	default:
+		return nil, apperr.ErrBadRequest("支付通道无效")
+	}
+	if err := s.verifySignupSMSCode(ctx, input.Phone, input.SMSCode); err != nil {
+		return nil, err
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, apperr.ErrInternalF("密码加密失败", err)
+	}
+	outTradeNo, err := generateOutTradeNo()
+	if err != nil {
+		return nil, apperr.ErrInternalF("生成订单号失败", err)
+	}
+
+	return s.repo.CreatePublicSignupOrder(ctx, commercial.CreatePublicSignupOrderRecordInput{
+		Phone:          input.Phone,
+		PasswordHash:   string(hashedPassword),
+		BrandName:      input.BrandName,
+		LogoURL:        input.LogoURL,
+		ContactName:    input.ContactName,
+		ContactEmail:   input.ContactEmail,
+		IndustryType:   input.IndustryType,
+		PlanID:         input.PlanID,
+		BillingCycle:   input.BillingCycle,
+		PaymentChannel: input.PaymentChannel,
+		OutTradeNo:     outTradeNo,
+	})
 }
 
 func (s *Service) UpdateSaaSPlan(ctx context.Context, id int64, input commercial.UpdateSaaSPlanInput) (*commercial.SaaSPlan, error) {
@@ -131,12 +210,44 @@ func (s *Service) RequestSignupSMSCode(ctx context.Context, phone string) error 
 	if phone == "" {
 		return apperr.ErrBadRequest("手机号不能为空")
 	}
-	if s.cfg.App.Env == "production" && s.cfg.SMS.Provider == "" {
+	if s.cfg.App.Env == "production" && !s.cfg.SMS.AllowMock && s.cfg.SMS.Provider == "" {
 		return apperr.ErrInternal("短信服务未配置")
+	}
+	if s.cfg.App.Env == "production" && !s.cfg.SMS.AllowMock && s.cfg.SMS.Provider != "mock" {
+		return apperr.ErrInternal("短信服务 Provider 尚未接入")
 	}
 	// The first implementation keeps the public API contract stable and uses
 	// mock SMS in development. A real provider can plug in behind this method.
 	return nil
+}
+
+func (s *Service) verifySignupSMSCode(ctx context.Context, phone, code string) error {
+	_ = ctx
+	_ = phone
+	mockCode := s.cfg.SMS.MockCode
+	if mockCode == "" {
+		mockCode = "123456"
+	}
+
+	if s.cfg.App.Env == "production" && !s.cfg.SMS.AllowMock && s.cfg.SMS.Provider == "" {
+		return apperr.ErrInternal("短信服务未配置")
+	}
+	if s.cfg.SMS.AllowMock || s.cfg.SMS.Provider == "" || s.cfg.SMS.Provider == "mock" || s.cfg.App.Env != "production" {
+		if code != mockCode {
+			return apperr.ErrBadRequest("短信验证码错误")
+		}
+		return nil
+	}
+
+	return apperr.ErrInternal("短信验证码验证服务未接入")
+}
+
+func generateOutTradeNo() (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("MS%s%s", time.Now().UTC().Format("20060102150405"), hex.EncodeToString(b[:])), nil
 }
 
 func (s *Service) pagination(page, pageSize int) (int, int) {
