@@ -23,6 +23,8 @@ database:
   max_idle_conns: 5
   conn_max_lifetime: 5m
   log_level: "warn"  # silent / error / warn / info
+  # Batch 4.5: dev / mock 模式默认开启；生产 yaml 应改为 false，靠 env 显式开。
+  auto_migrate_on_boot: true
 
 # Redis 配置
 redis:

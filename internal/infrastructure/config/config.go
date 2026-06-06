@@ -47,6 +47,10 @@ type DatabaseConfig struct {
 	MaxIdleConns    int           `mapstructure:"max_idle_conns"`
 	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime"`
 	LogLevel        string        `mapstructure:"log_level"`
+	// AutoMigrateOnBoot 启动时自动应用待执行的 golang-migrate up 步骤。
+	// dev / mock 模式 yaml 默认 true；生产 yaml 默认 false，需要
+	// MINI_SCHEDULE_DATABASE_AUTO_MIGRATE_ON_BOOT=true 显式开启。
+	AutoMigrateOnBoot bool `mapstructure:"auto_migrate_on_boot"`
 }
 
 // DSN 返回 GORM 所需的数据源名称
@@ -134,6 +138,7 @@ func Load(configPath string) (*Config, error) {
 		"server.port",
 		"database.host", "database.port", "database.user",
 		"database.password", "database.dbname", "database.ssl_mode",
+		"database.auto_migrate_on_boot",
 		"redis.addr", "redis.password", "redis.db",
 		"jwt.secret", "jwt.expire", "jwt.refresh_expire",
 		"cors.allowed_origins",
