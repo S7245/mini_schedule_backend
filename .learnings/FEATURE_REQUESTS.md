@@ -21,3 +21,7 @@
 - **Location UpdateStatus 幂等快路径**：若 status 没变化，当前仍开事务 + SELECT。可以用 `UPDATE ... WHERE status <> ?` + RowsAffected 判断，跳过整个事务。也属于性能清债。
 - **Step enum 表格化**：`AllSteps` / `IsValidStepKey` / `IsSkippable` + onboarding service 的大 switch 都从同一份 step 列表派生。建议改成 `var stepCatalog = []StepDef{{Key, Skippable, Order, CountSource}}` + `init` 建 by-key 索引，下一次加 step 时只改一处。
 - **brand_profile 完成判定加 logo_url**：当前只看 description + industry_type，但 c 端品牌头会渲染 logo。建议在产品确认后加 logo_url 必填校验（或 fallback 占位图策略）再翻 step 完成。
+
+## 2026-06-06 Batch 4 → Batch 5 起飞前必做
+
+- **migration 自动化 / schema drift 防御**（来自 ERRORS.md 同日条目）：Batch 4 的 000004 在本地从未应用且 unit test 未发现，到 Batch 5 staff/course CRUD 时 schema 变更只会更频繁。下一批起跑前**必须**二选一落地：(a) `api-*` boot 时调 `golang-migrate.Up()` 自动应用（生产用环境变量开关），失败则 `log.Fatal`；或 (b) CI 步骤 `migrate up && go test ./...` 用真实 PG 跑而非 sqlmock。当前 Makefile 硬编码 `postgres://postgres:postgres@...` 也需要顺手改为读 `DATABASE_URL` / `${PG_USER:-$USER}`。

@@ -21,3 +21,21 @@ ERROR: null value in column "headers" of relation "payment_callback_logs" violat
 `OperationLogModel.Metadata` 当前所有调用点都显式 `json.Marshal(...)` 赋了非 nil 字节切片，所以暂未爆雷。但只要后续有人写 `tx.Create(&OperationLogModel{...})` 忘记给 Metadata，就会复发同样 23502。建议要么给每个含 `JSONB NOT NULL` 的 model 加 BeforeCreate hook，要么写一个共用 `defaultJSONBField(field *[]byte)` 工具并在 PR review 时强制要求。
 
 `migrations/000003_course_booking_schema.up.sql:1171` 的 `brand_settings.setting_value` 目前还没有对应 GORM model，引入时直接带上 hook。
+
+## 2026-06-06 migration 000004 本地未应用
+
+**症状**：Batch 4 实现完成、单元测试全过、但本地起 `api-brand` 跑 `PATCH /brand/profile` 写 `description` 列时报 `column "description" of relation "brands" does not exist`。
+
+**根因**：`backend/Makefile` 的 `migrate-up` target 把 DSN 硬编码成 `postgres://postgres:postgres@127.0.0.1:5432/...`，但开发机的本地 PG 实例 default superuser 是 `liushan`（macOS Homebrew `brew install postgresql` 默认行为），没有 `postgres` 角色。`make migrate-up` 静默失败或报 `FATAL: role "postgres" does not exist`，开发者以为 migration 已经在容器里跑过了，实则 000004 从未应用。
+
+**修复（一次性）**：
+```bash
+psql -d mini_schedule -c 'ALTER TABLE brands ADD COLUMN IF NOT EXISTS description VARCHAR(2000);'
+```
+或临时改 Makefile DSN 走 `$USER` / 本地 trust 配置后再 `make migrate-up`。
+
+**通用化教训**：
+1. 任何 "feature 依赖新 migration" 的 batch 必须验证 migration 在本地 / 测试环境真跑过——单测用 sqlmock 不能证明 schema 已升。
+2. Makefile 的硬编码 DSN 是开发体验黑洞，应改为读 `DATABASE_URL` 环境变量（生产 Railway 已经走这套）；或加 `make migrate-up-local` 用 `${PG_USER:-$USER}` 兜底。
+3. 启动 `api-*` 时建议加可选的 "schema drift check"：把 `migrations/*.up.sql` 的预期表/列与 `information_schema` 实际对比，drift 时打 warning（生产关闭）。
+4. 下一批起飞前先把 migration 自动化（boot 时 `migrate.Up()`）或在 CI 加 schema 校验，否则会重复踩这个坑。
