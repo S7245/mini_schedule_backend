@@ -14,6 +14,7 @@ run-app:
 	go run ./cmd/api-app/
 
 # 	CONFIG_PATH=configs/config-admin.yaml go run ./cmd/api-admin/
+# 	CONFIG_PATH=configs/config-brand.yaml go run ./cmd/api-brand/
 run-admin:
 	go run ./cmd/api-admin/
 
@@ -39,13 +40,18 @@ docker-up:
 docker-down:
 	docker-compose down
 
+# Batch 4.5：用 DATABASE_URL 兜底；本地开发未设时 fallback 到当前 OS user，
+# 避免 Batch 4 那次"硬编码 postgres role 与开发机用户不一致 → make migrate-up 静默 no-op"的坑。
+# 显式覆盖：DATABASE_URL=postgres://foo:bar@host/db make migrate-up
+DATABASE_URL ?= postgres://$(or $(PG_USER),$(USER))@127.0.0.1:5432/mini_schedule?sslmode=disable
+
 # 数据库迁移（向上）
 migrate-up:
-	migrate -path migrations -database "postgres://postgres:postgres@127.0.0.1:5432/mini_schedule?sslmode=disable" up
+	migrate -path migrations -database "$(DATABASE_URL)" up
 
 # 数据库迁移（向下）
 migrate-down:
-	migrate -path migrations -database "postgres://postgres:postgres@127.0.0.1:5432/mini_schedule?sslmode=disable" down 1
+	migrate -path migrations -database "$(DATABASE_URL)" down 1
 
 # Lint
 lint:
