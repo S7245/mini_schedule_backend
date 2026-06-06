@@ -1,6 +1,7 @@
 package errors
 
 import (
+	stderrors "errors"
 	"fmt"
 	"net/http"
 )
@@ -10,40 +11,57 @@ type ErrorCode string
 
 const (
 	// 通用错误
-	ErrInternalServer   ErrorCode = "INTERNAL_SERVER_ERROR"
-	ErrInvalidRequest   ErrorCode = "INVALID_REQUEST"
-	ErrUnauthorized     ErrorCode = "UNAUTHORIZED"
-	ErrForbidden        ErrorCode = "FORBIDDEN"
-	ErrNotFound         ErrorCode = "NOT_FOUND"
-	ErrTooManyRequests  ErrorCode = "TOO_MANY_REQUESTS"
+	ErrInternalServer  ErrorCode = "INTERNAL_SERVER_ERROR"
+	ErrInvalidRequest  ErrorCode = "INVALID_REQUEST"
+	ErrUnauthorized    ErrorCode = "UNAUTHORIZED"
+	ErrForbidden       ErrorCode = "FORBIDDEN"
+	ErrNotFound        ErrorCode = "NOT_FOUND"
+	ErrTooManyRequests ErrorCode = "TOO_MANY_REQUESTS"
 
 	// 认证错误 (AUTH_*)
-	ErrInvalidToken     ErrorCode = "AUTH_INVALID_TOKEN"
-	ErrTokenExpired     ErrorCode = "AUTH_TOKEN_EXPIRED"
+	ErrInvalidToken       ErrorCode = "AUTH_INVALID_TOKEN"
+	ErrTokenExpired       ErrorCode = "AUTH_TOKEN_EXPIRED"
 	ErrInvalidCredentials ErrorCode = "AUTH_INVALID_CREDENTIALS"
-	ErrAccountDisabled  ErrorCode = "AUTH_ACCOUNT_DISABLED"
+	ErrAccountDisabled    ErrorCode = "AUTH_ACCOUNT_DISABLED"
 
 	// 品牌相关 (BRAND_*)
-	ErrBrandNotFound    ErrorCode = "BRAND_NOT_FOUND"
-	ErrBrandExists      ErrorCode = "BRAND_EXISTS"
-	ErrBrandDisabled    ErrorCode = "BRAND_DISABLED"
+	ErrBrandNotFound ErrorCode = "BRAND_NOT_FOUND"
+	ErrBrandExists   ErrorCode = "BRAND_EXISTS"
+	ErrBrandDisabled ErrorCode = "BRAND_DISABLED"
 
 	// 用户相关 (USER_*)
-	ErrUserNotFound     ErrorCode = "USER_NOT_FOUND"
-	ErrUserExists       ErrorCode = "USER_EXISTS"
-	ErrUserDisabled     ErrorCode = "USER_DISABLED"
+	ErrUserNotFound ErrorCode = "USER_NOT_FOUND"
+	ErrUserExists   ErrorCode = "USER_EXISTS"
+	ErrUserDisabled ErrorCode = "USER_DISABLED"
 
 	// 课程相关 (COURSE_*)
-	ErrCourseNotFound   ErrorCode = "COURSE_NOT_FOUND"
-	ErrCourseDisabled   ErrorCode = "COURSE_DISABLED"
+	ErrCourseNotFound ErrorCode = "COURSE_NOT_FOUND"
+	ErrCourseDisabled ErrorCode = "COURSE_DISABLED"
 
 	// 训练记录相关 (TRAINING_*)
 	ErrTrainingNotFound ErrorCode = "TRAINING_NOT_FOUND"
+
+	// Batch 4 — 通用参数 / 品牌资料
+	ErrInvalidParam        ErrorCode = "INVALID_PARAM"
+	ErrBrandNotActive      ErrorCode = "BRAND_NOT_ACTIVE"
+	ErrBrandCodeDuplicated ErrorCode = "BRAND_CODE_DUPLICATED"
+
+	// Batch 4 — Onboarding
+	ErrStepNotSkippable   ErrorCode = "STEP_NOT_SKIPPABLE"
+	ErrInvalidStepKey     ErrorCode = "INVALID_STEP_KEY"
+	ErrOnboardingNotReady ErrorCode = "ONBOARDING_NOT_READY"
+
+	// Batch 4 — Location & subscription quota
+	ErrLocationNameDuplicated ErrorCode = "LOCATION_NAME_DUPLICATED"
+	ErrLocationNotFound       ErrorCode = "LOCATION_NOT_FOUND"
+	ErrQuotaExceeded          ErrorCode = "QUOTA_EXCEEDED"
+	ErrSubscriptionRestricted ErrorCode = "SUBSCRIPTION_RESTRICTED"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码
 type AppError struct {
 	Code       ErrorCode `json:"code"`
+	MessageKey string    `json:"-"`
 	Message    string    `json:"message"`
 	HTTPStatus int       `json:"-"`
 	Err        error     `json:"-"` // 内部错误，不暴露给前端
@@ -64,6 +82,7 @@ func (e *AppError) Unwrap() error {
 func NewAppError(code ErrorCode, message string, httpStatus int) *AppError {
 	return &AppError{
 		Code:       code,
+		MessageKey: message,
 		Message:    message,
 		HTTPStatus: httpStatus,
 	}
@@ -73,22 +92,33 @@ func NewAppError(code ErrorCode, message string, httpStatus int) *AppError {
 func NewAppErrorF(code ErrorCode, message string, httpStatus int, err error) *AppError {
 	return &AppError{
 		Code:       code,
+		MessageKey: message,
 		Message:    message,
 		HTTPStatus: httpStatus,
 		Err:        err,
 	}
 }
 
+// NewAppErrorWithKey 创建带翻译 key 的 AppError，message 作为默认回退文案
+func NewAppErrorWithKey(code ErrorCode, messageKey, message string, httpStatus int) *AppError {
+	return &AppError{
+		Code:       code,
+		MessageKey: messageKey,
+		Message:    message,
+		HTTPStatus: httpStatus,
+	}
+}
+
 // IsAppError 判断是否为 AppError
 func IsAppError(err error) bool {
 	var appErr *AppError
-	return err != nil && errAs(err, &appErr)
+	return err != nil && stderrors.As(err, &appErr)
 }
 
 // GetAppError 从 error 中提取 AppError
 func GetAppError(err error) *AppError {
 	var appErr *AppError
-	if errAs(err, &appErr) {
+	if stderrors.As(err, &appErr) {
 		return appErr
 	}
 	return nil
@@ -126,19 +156,4 @@ func ErrForbiddenF(message string) *AppError {
 
 func ErrNotFoundF(code ErrorCode, message string) *AppError {
 	return NewAppError(code, message, http.StatusNotFound)
-}
-
-// errAs 是 errors.As 的封装，避免循环导入
-func errAs(err error, target interface{}) bool {
-	if err == nil {
-		return false
-	}
-	switch v := err.(type) {
-	case *AppError:
-		if t, ok := target.(**AppError); ok {
-			*t = v
-			return true
-		}
-	}
-	return false
 }
