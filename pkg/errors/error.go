@@ -60,11 +60,21 @@ const (
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码
 type AppError struct {
-	Code       ErrorCode `json:"code"`
-	MessageKey string    `json:"-"`
-	Message    string    `json:"message"`
-	HTTPStatus int       `json:"-"`
-	Err        error     `json:"-"` // 内部错误，不暴露给前端
+	Code       ErrorCode      `json:"code"`
+	MessageKey string         `json:"-"`
+	Message    string         `json:"message"`
+	HTTPStatus int            `json:"-"`
+	Err        error          `json:"-"` // 内部错误，不暴露给前端
+	Details    map[string]any `json:"-"` // 业务级附加数据（如 quota current/max），由 response.Error 统一序列化进 Response.Data
+}
+
+// WithDetails 链式给 AppError 挂额外的 data，供前端展示。
+func (e *AppError) WithDetails(details map[string]any) *AppError {
+	if e == nil {
+		return nil
+	}
+	e.Details = details
+	return e
 }
 
 func (e *AppError) Error() string {

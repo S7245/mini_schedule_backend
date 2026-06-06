@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
+	"github.com/zkw/mini-schedule/backend/pkg/i18n"
 )
 
 // Response 统一 API 响应结构
@@ -18,7 +19,7 @@ type Response struct {
 func Success(c *gin.Context, data interface{}) {
 	c.JSON(http.StatusOK, Response{
 		Code:    "OK",
-		Message: "success",
+		Message: message(c, i18n.KeySuccess, "success"),
 		Data:    data,
 	})
 }
@@ -27,7 +28,7 @@ func Success(c *gin.Context, data interface{}) {
 func SuccessMessage(c *gin.Context, message string) {
 	c.JSON(http.StatusOK, Response{
 		Code:    "OK",
-		Message: message,
+		Message: localize(c, message, message),
 	})
 }
 
@@ -35,7 +36,7 @@ func SuccessMessage(c *gin.Context, message string) {
 func SuccessNoData(c *gin.Context) {
 	c.JSON(http.StatusOK, Response{
 		Code:    "OK",
-		Message: "success",
+		Message: message(c, i18n.KeySuccess, "success"),
 	})
 }
 
@@ -47,16 +48,20 @@ func ErrInvalidRequest(message string) error {
 // Error 错误响应（从 AppError 转换）
 func Error(c *gin.Context, err error) {
 	if appErr := apperr.GetAppError(err); appErr != nil {
-		c.JSON(appErr.HTTPStatus, Response{
+		resp := Response{
 			Code:    string(appErr.Code),
-			Message: appErr.Message,
-		})
+			Message: errorMessage(c, appErr),
+		}
+		if len(appErr.Details) > 0 {
+			resp.Data = appErr.Details
+		}
+		c.JSON(appErr.HTTPStatus, resp)
 		return
 	}
 	// 非 AppError，当作内部错误
 	c.JSON(http.StatusInternalServerError, Response{
 		Code:    string(apperr.ErrInternalServer),
-		Message: "internal server error",
+		Message: message(c, string(apperr.ErrInternalServer), "internal server error"),
 	})
 }
 
@@ -77,7 +82,7 @@ func SuccessPage(c *gin.Context, items interface{}, total int64, page, pageSize 
 	}
 	c.JSON(http.StatusOK, Response{
 		Code:    "OK",
-		Message: "success",
+		Message: message(c, i18n.KeySuccess, "success"),
 		Data: PageData{
 			Items:     items,
 			Total:     total,
@@ -86,4 +91,39 @@ func SuccessPage(c *gin.Context, items interface{}, total int64, page, pageSize 
 			TotalPage: totalPage,
 		},
 	})
+}
+
+func errorMessage(c *gin.Context, appErr *apperr.AppError) string {
+	key := appErr.MessageKey
+	if key == "" {
+		key = appErr.Message
+	}
+
+	fallback := appErr.Message
+	if fallback == "" {
+		fallback = string(appErr.Code)
+	}
+
+	localized := localize(c, key, fallback)
+	if localized != fallback || key == string(appErr.Code) {
+		return localized
+	}
+
+	if appErr.Code != apperr.ErrInternalServer {
+		return fallback
+	}
+
+	return message(c, string(appErr.Code), fallback)
+}
+
+func message(c *gin.Context, key, fallback string) string {
+	return localize(c, key, fallback)
+}
+
+func localize(c *gin.Context, key, fallback string) string {
+	var locale i18n.Locale
+	if c != nil {
+		locale = i18n.FromRequest(c.Request)
+	}
+	return i18n.Localize(locale, key, fallback)
 }
