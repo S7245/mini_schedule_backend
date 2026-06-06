@@ -14,6 +14,8 @@ import (
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
+	"github.com/zkw/mini-schedule/backend/internal/infrastructure/database"
+	"github.com/zkw/mini-schedule/backend/migrations"
 
 	_ "github.com/zkw/mini-schedule/backend/docs/brand" // swagger docs
 )
@@ -58,6 +60,16 @@ func main() {
 		handler = slog.NewTextHandler(os.Stdout, opts)
 	}
 	log := slog.New(handler)
+
+	// Batch 4.5：按 config 开关在 Wire 之前应用 migration up。
+	// 多 cmd 同时启动靠 Postgres advisory lock 互斥；后到的看到 schema 已就绪直接 no-op。
+	if cfg.Database.AutoMigrateOnBoot {
+		if err := database.RunMigrationsUp(cfg.Database.DSN(), migrations.FS, log); err != nil {
+			log.Error("migrations failed; aborting boot to avoid running on broken schema",
+				slog.Any("error", err))
+			os.Exit(1)
+		}
+	}
 
 	// Wire 注入
 	app, cleanup, err := initializeBrandApp(cfg, log)

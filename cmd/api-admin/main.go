@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	swaggerFiles "github.com/swaggo/files"
-	ginSwagger "github.com/swaggo/gin-swagger"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
+	"github.com/zkw/mini-schedule/backend/internal/infrastructure/database"
+	"github.com/zkw/mini-schedule/backend/migrations"
 
 	_ "github.com/zkw/mini-schedule/backend/docs/admin" // swagger docs
 )
@@ -57,17 +57,21 @@ func main() {
 	}
 	log := slog.New(handler)
 
+	// Batch 4.5：auto-apply migration up before Wire（同 api-brand 注释）。
+	if cfg.Database.AutoMigrateOnBoot {
+		if err := database.RunMigrationsUp(cfg.Database.DSN(), migrations.FS, log); err != nil {
+			log.Error("migrations failed; aborting boot to avoid running on broken schema",
+				slog.Any("error", err))
+			os.Exit(1)
+		}
+	}
+
 	app, cleanup, err := initializeAdminApp(cfg, log)
 	if err != nil {
 		log.Error("Failed to initialize application", slog.Any("error", err))
 		os.Exit(1)
 	}
 	defer cleanup()
-
-	// Swagger UI（仅 debug 模式）
-	if cfg.App.Debug {
-		app.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
-	}
 
 	// gin 用于类型推断（避免 imported and not used）
 	_ = gin.Mode()

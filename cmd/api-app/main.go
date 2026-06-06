@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
+	"github.com/zkw/mini-schedule/backend/internal/infrastructure/database"
+	"github.com/zkw/mini-schedule/backend/migrations"
 )
 
 func main() {
@@ -43,6 +45,15 @@ func main() {
 		handler = slog.NewTextHandler(os.Stdout, opts)
 	}
 	log := slog.New(handler)
+
+	// Batch 4.5：auto-apply migration up before Wire（同 api-brand 注释）。
+	if cfg.Database.AutoMigrateOnBoot {
+		if err := database.RunMigrationsUp(cfg.Database.DSN(), migrations.FS, log); err != nil {
+			log.Error("migrations failed; aborting boot to avoid running on broken schema",
+				slog.Any("error", err))
+			os.Exit(1)
+		}
+	}
 
 	app, cleanup, err := initializeAppApp(cfg, log)
 	if err != nil {
