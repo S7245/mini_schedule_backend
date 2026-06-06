@@ -50,11 +50,11 @@ func (f *fakeRepo) Update(_ context.Context, _, _ int64, _ domainlocation.Update
 	return f.got, f.updateErr
 }
 
-func (f *fakeRepo) UpdateStatus(_ context.Context, _, _ int64, _ domainlocation.Status) (*domainlocation.Location, error) {
+func (f *fakeRepo) UpdateStatus(_ context.Context, _, _, _ int64, _ domainlocation.Status) (*domainlocation.Location, error) {
 	return f.got, f.statusErr
 }
 
-func (f *fakeRepo) SoftDelete(_ context.Context, _, _ int64) error {
+func (f *fakeRepo) SoftDelete(_ context.Context, _, _, _ int64) error {
 	return f.delErr
 }
 
@@ -133,7 +133,7 @@ func TestGet_NotFound(t *testing.T) {
 func TestUpdateStatus_RejectsBadStatus(t *testing.T) {
 	repo := &fakeRepo{}
 	svc := NewService(repo)
-	_, err := svc.UpdateStatus(context.Background(), 1, 1, "frozen")
+	_, err := svc.UpdateStatus(context.Background(), 1, 99, 1, "frozen")
 	if err == nil {
 		t.Fatal("expected error for invalid status")
 	}
@@ -157,7 +157,7 @@ func TestList_Pagination(t *testing.T) {
 func TestDelete_NotFoundPropagates(t *testing.T) {
 	repo := &fakeRepo{delErr: apperr.NewAppError(apperr.ErrLocationNotFound, "x", 404)}
 	svc := NewService(repo)
-	err := svc.Delete(context.Background(), 1, 1)
+	err := svc.Delete(context.Background(), 1, 99, 1)
 	if err == nil {
 		t.Fatal("expected error")
 	}

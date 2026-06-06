@@ -8,7 +8,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	appLocation "github.com/zkw/mini-schedule/backend/internal/application/location"
-	"github.com/zkw/mini-schedule/backend/internal/infrastructure/persistence"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 	"github.com/zkw/mini-schedule/backend/pkg/response"
@@ -43,6 +42,7 @@ type createLocationBody struct {
 
 func (h *LocationHandler) create(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
 	var body createLocationBody
 	if err := c.ShouldBindJSON(&body); err != nil {
 		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
@@ -50,25 +50,15 @@ func (h *LocationHandler) create(c *gin.Context) {
 	}
 	loc, err := h.svc.Create(c.Request.Context(), appLocation.CreateInput{
 		BrandID: brandID,
+		ActorID: actorID,
 		Name:    body.Name,
 		Address: body.Address,
 		Phone:   body.Phone,
 		Remark:  body.Remark,
 	})
 	if err != nil {
-		// 如果是 QUOTA_EXCEEDED，附带 current/max 详情
-		if cur, max, ok := persistence.QuotaDetailsFromError(err); ok {
-			ae := apperr.GetAppError(err)
-			c.JSON(ae.HTTPStatus, gin.H{
-				"code":    string(ae.Code),
-				"message": ae.Message,
-				"data": gin.H{
-					"current": cur,
-					"max":     max,
-				},
-			})
-			return
-		}
+		// review #6：QUOTA_EXCEEDED 的 current/max 已通过 AppError.Details 挂载，
+		// response.Error 会统一序列化进 Response.Data，无需再手写非标准 envelope。
 		response.Error(c, err)
 		return
 	}
@@ -151,6 +141,7 @@ type updateLocationStatusBody struct {
 
 func (h *LocationHandler) updateStatus(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		response.Error(c, apperr.NewAppError(apperr.ErrLocationNotFound, "门店不存在", 404))
@@ -161,7 +152,7 @@ func (h *LocationHandler) updateStatus(c *gin.Context) {
 		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
 		return
 	}
-	loc, err := h.svc.UpdateStatus(c.Request.Context(), brandID, id, body.Status)
+	loc, err := h.svc.UpdateStatus(c.Request.Context(), brandID, actorID, id, body.Status)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -171,12 +162,13 @@ func (h *LocationHandler) updateStatus(c *gin.Context) {
 
 func (h *LocationHandler) delete(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		response.Error(c, apperr.NewAppError(apperr.ErrLocationNotFound, "门店不存在", 404))
 		return
 	}
-	if err := h.svc.Delete(c.Request.Context(), brandID, id); err != nil {
+	if err := h.svc.Delete(c.Request.Context(), brandID, actorID, id); err != nil {
 		response.Error(c, err)
 		return
 	}

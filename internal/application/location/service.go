@@ -21,6 +21,7 @@ func NewService(repo domainlocation.Repository) *Service {
 // CreateInput 创建入参。
 type CreateInput struct {
 	BrandID int64
+	ActorID int64 // brand_user_id（用于 OperationLog；0 表示未知 / 系统操作）
 	Name    string
 	Address string
 	Phone   string
@@ -56,6 +57,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domainlocation.L
 	}
 	return s.repo.Create(ctx, domainlocation.CreateLocationInput{
 		BrandID: in.BrandID,
+		ActorID: in.ActorID,
 		Name:    in.Name,
 		Address: in.Address,
 		Phone:   in.Phone,
@@ -114,14 +116,14 @@ func (s *Service) Update(ctx context.Context, brandID, id int64, in UpdateInput)
 }
 
 // UpdateStatus 状态切换（active / inactive）。
-func (s *Service) UpdateStatus(ctx context.Context, brandID, id int64, status string) (*domainlocation.Location, error) {
+func (s *Service) UpdateStatus(ctx context.Context, brandID, actorID, id int64, status string) (*domainlocation.Location, error) {
 	if !domainlocation.IsValidStatus(status) {
 		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "无效的门店状态", 400)
 	}
-	return s.repo.UpdateStatus(ctx, brandID, id, domainlocation.Status(status))
+	return s.repo.UpdateStatus(ctx, brandID, actorID, id, domainlocation.Status(status))
 }
 
 // Delete 软删。
-func (s *Service) Delete(ctx context.Context, brandID, id int64) error {
-	return s.repo.SoftDelete(ctx, brandID, id)
+func (s *Service) Delete(ctx context.Context, brandID, actorID, id int64) error {
+	return s.repo.SoftDelete(ctx, brandID, actorID, id)
 }

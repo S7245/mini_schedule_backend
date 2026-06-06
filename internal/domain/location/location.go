@@ -34,6 +34,7 @@ type Location struct {
 // CreateLocationInput POST 入参。
 type CreateLocationInput struct {
 	BrandID int64
+	ActorID int64 // 操作的 brand_user_id，用于 OperationLog 留痕
 	Name    string
 	Address string
 	Phone   string
@@ -62,6 +63,6 @@ type Repository interface {
 	GetByID(ctx context.Context, brandID, id int64) (*Location, error)
 	List(ctx context.Context, filter ListLocationsFilter, offset, limit int) ([]*Location, int64, error)
 	Update(ctx context.Context, brandID, id int64, input UpdateLocationInput) (*Location, error)
-	UpdateStatus(ctx context.Context, brandID, id int64, status Status) (*Location, error)
-	SoftDelete(ctx context.Context, brandID, id int64) error
+	UpdateStatus(ctx context.Context, brandID, actorID, id int64, status Status) (*Location, error)
+	SoftDelete(ctx context.Context, brandID, actorID, id int64) error
 }

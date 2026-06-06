@@ -2,8 +2,10 @@ package persistence
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -33,10 +35,14 @@ func (r *locationRepository) Create(ctx context.Context, input location.CreateLo
 	var created LocationModel
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 1) 锁 brand 的 active subscription
+		// 1) 锁 brand 的 active 且未过期 subscription（review #2）：
+		//    单看 status='active' 不够——expires_at 已过但 cron 没翻状态时仍会被命中。
+		//    实际有效窗口：grace_ends_at 存在则用 grace_ends_at；否则用 expires_at。
+		now := time.Now().UTC()
 		var sub BrandSubscriptionModel
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("brand_id = ? AND status = ?", input.BrandID, "active").
+			Where("brand_id = ? AND status = ? AND (grace_ends_at > ? OR (grace_ends_at IS NULL AND expires_at > ?))",
+				input.BrandID, "active", now, now).
 			Order("id DESC").
 			First(&sub).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -54,10 +60,12 @@ func (r *locationRepository) Create(ctx context.Context, input location.CreateLo
 		}
 
 		if current >= int64(sub.MaxLocations) {
-			ae := apperr.NewAppError(apperr.ErrQuotaExceeded, "门店数量已达套餐上限", 409)
-			// 让上层能拿到 current/max；约定通过 Error 字符串携带，不再深 wrap
-			ae.Err = &quotaDetails{current: current, max: int64(sub.MaxLocations)}
-			return ae
+			// review #6：current/max 走 AppError.Details，由 response.Error 统一序列化。
+			return apperr.NewAppError(apperr.ErrQuotaExceeded, "门店数量已达套餐上限", 409).
+				WithDetails(map[string]any{
+					"current": current,
+					"max":     int64(sub.MaxLocations),
+				})
 		}
 
 		// 3) INSERT
@@ -75,7 +83,9 @@ func (r *locationRepository) Create(ctx context.Context, input location.CreateLo
 			}
 			return apperr.ErrInternalF("创建门店失败", err)
 		}
-		return nil
+
+		// 4) OperationLog 留痕（同事务内）
+		return writeLocationOperationLog(tx, input.BrandID, input.ActorID, "location_created", created.ID, nil, &created)
 	})
 	if err != nil {
 		return nil, err
@@ -84,23 +94,18 @@ func (r *locationRepository) Create(ctx context.Context, input location.CreateLo
 	return toLocationDomain(&created), nil
 }
 
-// quotaDetails 是 QUOTA_EXCEEDED 的内部 carrier，供 application 层取 current/max。
-type quotaDetails struct {
-	current int64
-	max     int64
-}
-
-func (q *quotaDetails) Error() string { return "quota" }
-
 // QuotaDetailsFromError 解出 quota 详情，没有时返回 false。
+// 保留供外部（如运营 admin 端）想以编程方式从 AppError.Details 里读 current/max 时使用。
 func QuotaDetailsFromError(err error) (current, max int64, ok bool) {
 	if err == nil {
 		return 0, 0, false
 	}
 	var ae *apperr.AppError
-	if errors.As(err, &ae) {
-		if q, isQ := ae.Err.(*quotaDetails); isQ && q != nil {
-			return q.current, q.max, true
+	if errors.As(err, &ae) && ae != nil && ae.Details != nil {
+		c, hasC := ae.Details["current"].(int64)
+		m, hasM := ae.Details["max"].(int64)
+		if hasC && hasM {
+			return c, m, true
 		}
 	}
 	return 0, 0, false
@@ -180,36 +185,77 @@ func (r *locationRepository) Update(ctx context.Context, brandID, id int64, inpu
 	return toLocationDomain(&m), nil
 }
 
-func (r *locationRepository) UpdateStatus(ctx context.Context, brandID, id int64, status location.Status) (*location.Location, error) {
+func (r *locationRepository) UpdateStatus(ctx context.Context, brandID, actorID, id int64, status location.Status) (*location.Location, error) {
 	var m LocationModel
-	if err := r.db.WithContext(ctx).Where("id = ? AND brand_id = ?", id, brandID).First(&m).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, apperr.NewAppError(apperr.ErrLocationNotFound, "门店不存在", 404)
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("id = ? AND brand_id = ?", id, brandID).First(&m).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrLocationNotFound, "门店不存在", 404)
+			}
+			return apperr.ErrInternalF("查询门店失败", err)
 		}
-		return nil, apperr.ErrInternalF("查询门店失败", err)
-	}
-
-	if m.Status != string(status) {
-		if err := r.db.WithContext(ctx).Model(&m).Update("status", string(status)).Error; err != nil {
-			return nil, apperr.ErrInternalF("更新门店状态失败", err)
+		if m.Status == string(status) {
+			// 幂等：状态相同不写日志
+			return nil
+		}
+		before := m
+		if err := tx.Model(&m).Update("status", string(status)).Error; err != nil {
+			return apperr.ErrInternalF("更新门店状态失败", err)
 		}
 		m.Status = string(status)
+		return writeLocationOperationLog(tx, brandID, actorID, "location_status_changed", id, &before, &m)
+	})
+	if err != nil {
+		return nil, err
 	}
-
 	return toLocationDomain(&m), nil
 }
 
-func (r *locationRepository) SoftDelete(ctx context.Context, brandID, id int64) error {
-	res := r.db.WithContext(ctx).
-		Where("id = ? AND brand_id = ?", id, brandID).
-		Delete(&LocationModel{})
-	if res.Error != nil {
-		return apperr.ErrInternalF("删除门店失败", res.Error)
+func (r *locationRepository) SoftDelete(ctx context.Context, brandID, actorID, id int64) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var before LocationModel
+		if err := tx.Where("id = ? AND brand_id = ?", id, brandID).First(&before).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrLocationNotFound, "门店不存在", 404)
+			}
+			return apperr.ErrInternalF("查询门店失败", err)
+		}
+		res := tx.Where("id = ? AND brand_id = ?", id, brandID).Delete(&LocationModel{})
+		if res.Error != nil {
+			return apperr.ErrInternalF("删除门店失败", res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return apperr.NewAppError(apperr.ErrLocationNotFound, "门店不存在", 404)
+		}
+		return writeLocationOperationLog(tx, brandID, actorID, "location_deleted", id, &before, nil)
+	})
+}
+
+// writeLocationOperationLog 在事务内写一条门店生命周期 OperationLog。
+// actor_type 固定为 brand_user；actorID 为 0 时存为 NULL（兼容旧调用 / 系统操作）。
+func writeLocationOperationLog(tx *gorm.DB, brandID, actorID int64, action string, locationID int64, before, after *LocationModel) error {
+	metadata, err := json.Marshal(map[string]interface{}{
+		"before": before,
+		"after":  after,
+	})
+	if err != nil {
+		return apperr.ErrInternalF("序列化操作日志失败", err)
 	}
-	if res.RowsAffected == 0 {
-		return apperr.NewAppError(apperr.ErrLocationNotFound, "门店不存在", 404)
+	var actorIDPtr *int64
+	if actorID > 0 {
+		actorIDPtr = &actorID
 	}
-	return nil
+	bID := brandID
+	tID := locationID
+	return tx.Create(&OperationLogModel{
+		BrandID:    &bID,
+		ActorType:  "brand_user",
+		ActorID:    actorIDPtr,
+		Action:     action,
+		TargetType: "location",
+		TargetID:   &tID,
+		Metadata:   metadata,
+	}).Error
 }
 
 func toLocationDomain(m *LocationModel) *location.Location {
