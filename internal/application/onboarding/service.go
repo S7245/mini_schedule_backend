@@ -57,12 +57,37 @@ func (s *Service) GetOnboardingStatus(ctx context.Context, brandID int64) (*doma
 	steps := make([]domainonboarding.StepView, 0, len(domainonboarding.AllSteps()))
 	var nextKey *domainonboarding.StepKey
 
+	// 第一次 pass：内存里算 status；收集需要持久化 completed 的 keys（review #3）。
+	toPersist := make([]domainonboarding.StepKey, 0)
 	for _, key := range domainonboarding.AllSteps() {
 		view := computeStepView(key, summary, counts, stepMap)
 		steps = append(steps, view)
+		if view.Status == domainonboarding.StepStatusCompleted {
+			rec, has := stepMap[key]
+			if !has || rec.Status != domainonboarding.StepStatusCompleted || rec.CompletedAt == nil {
+				toPersist = append(toPersist, key)
+			}
+		}
 		if nextKey == nil && view.Status != domainonboarding.StepStatusCompleted && view.Status != domainonboarding.StepStatusSkipped {
 			k := key
 			nextKey = &k
+		}
+	}
+
+	// 持久化新完成的 steps，并回填 view.CompletedAt（review #3）。
+	if len(toPersist) > 0 {
+		now := time.Now().UTC()
+		persisted, perr := s.repo.EnsureStepCompleted(ctx, brandID, toPersist, now)
+		if perr != nil {
+			return nil, perr
+		}
+		for i, v := range steps {
+			if v.Status == domainonboarding.StepStatusCompleted && v.CompletedAt == nil {
+				if ts, ok := persisted[v.StepKey]; ok {
+					t := ts
+					steps[i].CompletedAt = &t
+				}
+			}
 		}
 	}
 
@@ -128,11 +153,9 @@ func (s *Service) Complete(ctx context.Context, brandID int64) (*domainonboardin
 	}
 
 	now := time.Now().UTC()
-	if err := s.repo.MarkBrandOnboardingCompleted(ctx, brandID, now); err != nil {
-		return nil, err
-	}
-	// 清空 step metadata（per 契约 Q4）
-	if err := s.repo.ClearAllStepMetadata(ctx, brandID); err != nil {
+	// review #1：单事务原子完成 brand 状态更新 + metadata 清空，避免中间失败 + retry idempotent
+	// fast-path 跳过清理导致 orphan metadata 永久残留。
+	if err := s.repo.CompleteOnboarding(ctx, brandID, now); err != nil {
 		return nil, err
 	}
 

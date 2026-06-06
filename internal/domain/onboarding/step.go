@@ -124,7 +124,11 @@ type Repository interface {
 	GetBrandSummary(ctx context.Context, brandID int64) (*BrandSummary, error)
 	GetSteps(ctx context.Context, brandID int64) ([]StepRecord, error)
 	UpsertSkippedStep(ctx context.Context, brandID int64, key StepKey, reason string) (*StepRecord, error)
-	MarkBrandOnboardingCompleted(ctx context.Context, brandID int64, completedAt time.Time) error
-	ClearAllStepMetadata(ctx context.Context, brandID int64) error
+	// CompleteOnboarding 在单一事务内同时更新 brand.onboarding_status 并清空所有 step metadata（review #1，原子化）。
+	CompleteOnboarding(ctx context.Context, brandID int64, completedAt time.Time) error
 	GetCounts(ctx context.Context, brandID int64) (*CountsByStep, error)
+	// EnsureStepCompleted 把内存里计算出的 completed step 持久化到 brand_onboarding_steps（review #3）。
+	// keys 为空时是 no-op；已存在 status='skipped' 的行不会被覆盖（保留用户主动选择）。
+	// 返回 upsert 后每个 key 的 completed_at（用于回填 view）。
+	EnsureStepCompleted(ctx context.Context, brandID int64, keys []StepKey, completedAt time.Time) (map[StepKey]time.Time, error)
 }

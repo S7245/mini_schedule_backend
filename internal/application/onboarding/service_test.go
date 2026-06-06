@@ -52,21 +52,27 @@ func (r *fakeRepo) UpsertSkippedStep(_ context.Context, brandID int64, key domai
 	}, nil
 }
 
-func (r *fakeRepo) MarkBrandOnboardingCompleted(_ context.Context, _ int64, t time.Time) error {
+func (r *fakeRepo) CompleteOnboarding(_ context.Context, _ int64, t time.Time) error {
 	if r.markErr != nil {
 		return r.markErr
 	}
 	r.markedAt = &t
-	return nil
-}
-
-func (r *fakeRepo) ClearAllStepMetadata(_ context.Context, _ int64) error {
-	r.clearCalled = true
+	r.clearCalled = true // 单事务里 metadata 也清掉
 	return nil
 }
 
 func (r *fakeRepo) GetCounts(_ context.Context, _ int64) (*domainonboarding.CountsByStep, error) {
 	return r.counts, r.countsErr
+}
+
+func (r *fakeRepo) EnsureStepCompleted(
+	_ context.Context, _ int64, keys []domainonboarding.StepKey, t time.Time,
+) (map[domainonboarding.StepKey]time.Time, error) {
+	out := make(map[domainonboarding.StepKey]time.Time, len(keys))
+	for _, k := range keys {
+		out[k] = t
+	}
+	return out, nil
 }
 
 func newActiveSummary() *domainonboarding.BrandSummary {

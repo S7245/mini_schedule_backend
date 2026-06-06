@@ -46,7 +46,14 @@ func (h *OnboardingHandler) skipStep(c *gin.Context) {
 	stepKey := strings.TrimSpace(c.Param("step_key"))
 
 	var body skipStepBody
-	_ = c.ShouldBindJSON(&body)
+	// body 可选（reason 是可选字段）：空 body 允许；但若客户端发了非空且解析失败的 body
+	// 不能静默丢弃，否则审计字段会无声为空。
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			response.Error(c, response.ErrInvalidRequest("请求体格式错误"))
+			return
+		}
+	}
 
 	rec, err := h.svc.SkipStep(c.Request.Context(), brandID, stepKey, body.Reason)
 	if err != nil {
