@@ -18,6 +18,7 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/persistence"
 	appHandler "github.com/zkw/mini-schedule/backend/internal/interfaces/app"
+	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 )
 
 func provideDatabaseConfig(cfg *config.Config) *config.DatabaseConfig {
@@ -71,6 +72,7 @@ func newAppRouter(
 	}
 
 	r := gin.New()
+	r.Use(middleware.Locale())
 	r.Use(gin.Recovery())
 
 	api := r.Group("/api/v1/app")

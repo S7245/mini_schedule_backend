@@ -60,3 +60,4 @@ payment:
     serial_no: ""
     private_key_path: ""
     notify_url: ""
+    allow_mock: true

@@ -1,6 +1,10 @@
 package persistence
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
 
 type TimestampModel struct {
 	ID        int64     `gorm:"primaryKey;autoIncrement" json:"id"`
@@ -48,8 +52,8 @@ type SaaSPlanOrderModel struct {
 	Status                 string     `gorm:"size:30;not null;default:pending_payment" json:"status"`
 	OutTradeNo             string     `gorm:"size:100;not null;uniqueIndex" json:"out_trade_no"`
 	ThirdPartyTradeNo      string     `gorm:"size:100" json:"third_party_trade_no"`
-	WeChatCodeURL          string     `gorm:"size:500" json:"wechat_code_url"`
-	WeChatPrepayID         string     `gorm:"size:100" json:"wechat_prepay_id"`
+	WeChatCodeURL          string     `gorm:"column:wechat_code_url;size:500" json:"wechat_code_url"`
+	WeChatPrepayID         string     `gorm:"column:wechat_prepay_id;size:100" json:"wechat_prepay_id"`
 	PaymentRequestPayload  []byte     `gorm:"type:jsonb" json:"-"`
 	PaymentResponsePayload []byte     `gorm:"type:jsonb" json:"-"`
 	PaymentExpiresAt       *time.Time `json:"payment_expires_at"`
@@ -131,6 +135,16 @@ type PaymentCallbackLogModel struct {
 }
 
 func (PaymentCallbackLogModel) TableName() string { return "payment_callback_logs" }
+
+func (m *PaymentCallbackLogModel) BeforeCreate(*gorm.DB) error {
+	if len(m.Headers) == 0 {
+		m.Headers = []byte("{}")
+	}
+	if len(m.Payload) == 0 {
+		m.Payload = []byte("{}")
+	}
+	return nil
+}
 
 type OperationLogModel struct {
 	ID         int64     `gorm:"primaryKey;autoIncrement" json:"id"`

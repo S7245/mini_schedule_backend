@@ -1,11 +1,15 @@
 package admin
 
 import (
+	"io"
+	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	commercialapp "github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/domain/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
+	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 	"github.com/zkw/mini-schedule/backend/pkg/response"
 )
 
@@ -66,9 +70,9 @@ type createPublicSignupOrderRequest struct {
 	Phone          string `json:"phone" validate:"required"`
 	SMSCode        string `json:"sms_code" validate:"required"`
 	Password       string `json:"password" validate:"required,min=6,max=64"`
-	BrandName      string `json:"brand_name" validate:"required,min=2,max=100"`
+	BrandName      string `json:"brand_name" validate:"required,min=1,max=100"`
 	LogoURL        string `json:"logo_url" validate:"omitempty,url"`
-	ContactName    string `json:"contact_name" validate:"required,min=2,max=50"`
+	ContactName    string `json:"contact_name" validate:"required,min=1,max=50"`
 	ContactEmail   string `json:"contact_email" validate:"omitempty,email,max=100"`
 	IndustryType   string `json:"industry_type" validate:"omitempty,max=50"`
 	PlanID         int64  `json:"plan_id" validate:"required,gt=0"`
@@ -79,7 +83,61 @@ type createPublicSignupOrderRequest struct {
 func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
 	r.GET("/saas-plans", h.listPublicSaaSPlans)
 	r.POST("/signup/sms-code", h.requestSignupSMSCode)
+	r.POST("/signup/pre-validate", h.preValidateSignup)
 	r.POST("/signup/orders", h.createPublicSignupOrder)
+	r.POST("/payment/native", h.createWeChatNativePay)
+	r.GET("/payment/orders/:order_id", h.getOrderPaymentStatus)
+	r.POST("/payment/callback", h.handleWeChatPaymentCallback)
+}
+
+// handleWeChatPaymentCallback 处理微信支付 v3 异步回调。
+//
+// 响应规则：
+//   - 验签 / 时间戳失败 → 401 + {code:"UNAUTHORIZED", message:"invalid signature"}
+//     （微信会按 401 重试，对真实环境是合理的；mock 模式下也方便测试断言）
+//   - 其他业务情况（订单不存在、金额不一致、trade_state 非 SUCCESS、幂等成功 …）
+//     全部按 200 success 返回，避免微信无意义重试；记录由 service / repo 落到
+//     PaymentCallbackLog / OperationLog。
+//   - 仅在真正的内部错误（如数据库不可用）才返回 500，让微信重试。
+func (h *Handler) handleWeChatPaymentCallback(c *gin.Context) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "INVALID_REQUEST", "message": "failed to read body"})
+		return
+	}
+
+	headers := make(map[string]string, len(c.Request.Header))
+	for k, v := range c.Request.Header {
+		if len(v) > 0 {
+			headers[k] = v[0]
+		}
+	}
+
+	result, err := h.commercialSvc.ProcessWeChatPaymentCallback(c.Request.Context(), commercialapp.ProcessWeChatPaymentCallbackInput{
+		Headers: headers,
+		Body:    body,
+	})
+	if err != nil {
+		// 验签 / 解密 / timestamp 失败 → AppError(401)；其余 → 500
+		if appErr := apperr.GetAppError(err); appErr != nil && appErr.HTTPStatus == http.StatusUnauthorized {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"code":    string(apperr.ErrUnauthorized),
+				"message": "invalid signature",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    string(apperr.ErrInternalServer),
+			"message": "internal error",
+		})
+		return
+	}
+
+	_ = result // 当前响应体不暴露 result 细节，避免泄漏内部 ID
+	c.JSON(http.StatusOK, gin.H{
+		"code":    "OK",
+		"message": "success",
+	})
 }
 
 func (h *Handler) registerCommercialRoutes(r *gin.RouterGroup) {
@@ -122,7 +180,28 @@ func (h *Handler) requestSignupSMSCode(c *gin.Context) {
 		response.Error(c, h.validator.InvalidRequest(c, err))
 		return
 	}
-	if err := h.commercialSvc.RequestSignupSMSCode(c.Request.Context(), req.Phone); err != nil {
+	if err := h.commercialSvc.RequestSignupSMSCode(c.Request.Context(), req.Phone, c.ClientIP()); err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.SuccessNoData(c)
+}
+
+func (h *Handler) preValidateSignup(c *gin.Context) {
+	var req struct {
+		Phone    string `json:"phone" validate:"required"`
+		SMSCode  string `json:"sms_code" validate:"required"`
+		Password string `json:"password" validate:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
+		return
+	}
+	if err := h.validator.Struct(req); err != nil {
+		response.Error(c, h.validator.InvalidRequest(c, err))
+		return
+	}
+	if err := h.commercialSvc.PreValidateSignup(c.Request.Context(), req.Phone, req.SMSCode, req.Password); err != nil {
 		response.Error(c, err)
 		return
 	}
@@ -153,6 +232,40 @@ func (h *Handler) createPublicSignupOrder(c *gin.Context) {
 		BillingCycle:   commercial.BillingCycle(req.BillingCycle),
 		PaymentChannel: commercial.PaymentChannel(req.PaymentChannel),
 	})
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+func (h *Handler) createWeChatNativePay(c *gin.Context) {
+	var req struct {
+		OrderID int64 `json:"order_id" validate:"required,gt=0"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
+		return
+	}
+	if err := h.validator.Struct(req); err != nil {
+		response.Error(c, h.validator.InvalidRequest(c, err))
+		return
+	}
+	result, err := h.commercialSvc.CreateWeChatNativePay(c.Request.Context(), req.OrderID)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+func (h *Handler) getOrderPaymentStatus(c *gin.Context) {
+	orderID, err := strconv.ParseInt(c.Param("order_id"), 10, 64)
+	if err != nil {
+		response.Error(c, response.ErrInvalidRequest("无效的订单 ID"))
+		return
+	}
+	result, err := h.commercialSvc.GetOrderPaymentStatus(c.Request.Context(), orderID)
 	if err != nil {
 		response.Error(c, err)
 		return

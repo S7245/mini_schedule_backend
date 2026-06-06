@@ -1,6 +1,14 @@
 package commercial
 
-import "context"
+import (
+	"context"
+	"time"
+)
+
+type SaaSPlanOrderStatusResult struct {
+	Status string     `json:"status"`
+	PaidAt *time.Time `json:"paid_at"`
+}
 
 type CreateSaaSPlanInput struct {
 	Name              string
@@ -123,6 +131,34 @@ type ListOperationLogsFilter struct {
 	TargetID   int64
 }
 
+// ProcessWeChatCallbackInput 是经验签解密之后，repository 处理订单状态机所需要的全部入参。
+type ProcessWeChatCallbackInput struct {
+	OutTradeNo        string
+	ThirdPartyTradeNo string
+	Amount            int64 // 分（cents）
+	Currency          string
+	TradeState        WeChatTradeState
+	PaymentChannel    PaymentChannel
+	CallbackRequestID string
+	SuccessTime       *time.Time
+	ReceivedAt        time.Time
+	RawPayload        string // 原始 body 留档
+}
+
+// ProcessWeChatCallbackResult 描述本次回调处理后的结果。
+//
+// 对于幂等 / 忽略 / 失败场景，Success 仍可能为 false，但 HTTP 层依旧需要按
+// 微信要求返回 200（除非验签失败）。CallbackLogStatus 用于上层根据情况补
+// 写 CallbackLog（对于发生事务回滚的失败场景，CallbackLog 需要事务外写入）。
+type ProcessWeChatCallbackResult struct {
+	Success           bool
+	OrderID           int64
+	BrandID           int64
+	SubscriptionID    int64
+	Message           string
+	CallbackLogStatus PaymentCallbackLogStatus
+}
+
 type PlatformSummary struct {
 	BrandTotal              int64  `json:"brand_total"`
 	PendingBrandTotal       int64  `json:"pending_brand_total"`
@@ -156,4 +192,18 @@ type Repository interface {
 	ListOperationLogs(ctx context.Context, offset, limit int, filter ListOperationLogsFilter) ([]*OperationLog, int64, error)
 
 	GetPlatformSummary(ctx context.Context) (*PlatformSummary, error)
+
+	CreateWeChatNativePayOrder(ctx context.Context, orderID int64, codeURL, prepayID string, expiresAt time.Time) error
+	GetSaaSPlanOrderStatus(ctx context.Context, orderID int64) (*SaaSPlanOrderStatusResult, error)
+
+	// ProcessWeChatCallback 在单个事务内完成订单状态机推进 + 流水/订阅落库。
+	// 对于 trade_state 非 SUCCESS、金额不一致、订单状态不允许处理等业务失败，
+	// 不返回 error，而是通过 Result.CallbackLogStatus 告知上层结果。
+	// 返回 error 只在数据库异常 / 真实事务失败时发生（上层需要在事务外补写 CallbackLog）。
+	ProcessWeChatCallback(ctx context.Context, input ProcessWeChatCallbackInput) (*ProcessWeChatCallbackResult, error)
+
+	// WritePaymentCallbackLog 用于在事务之外补写一条 CallbackLog（验签失败或事务回滚场景）。
+	WritePaymentCallbackLog(ctx context.Context, log PaymentCallbackLog) error
+
+	ExistsPhoneInBrandUsers(ctx context.Context, phone string) (bool, error)
 }

@@ -5,22 +5,37 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/zkw/mini-schedule/backend/internal/domain/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
+	"github.com/zkw/mini-schedule/backend/internal/infrastructure/payment"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type Service struct {
-	repo commercial.Repository
-	cfg  *config.Config
+	repo          commercial.Repository
+	cfg           *config.Config
+	redis         *redis.Client
+	wechatAdapter *payment.WeChatPaymentAdapter
 }
 
-func NewService(repo commercial.Repository, cfg *config.Config) *Service {
-	return &Service{repo: repo, cfg: cfg}
+func NewService(
+	repo commercial.Repository,
+	cfg *config.Config,
+	redisClient *redis.Client,
+	wechatAdapter *payment.WeChatPaymentAdapter,
+) *Service {
+	return &Service{
+		repo:          repo,
+		cfg:           cfg,
+		redis:         redisClient,
+		wechatAdapter: wechatAdapter,
+	}
 }
 
 func (s *Service) CreateSaaSPlan(ctx context.Context, input commercial.CreateSaaSPlanInput) (*commercial.SaaSPlan, error) {
@@ -205,11 +220,39 @@ func (s *Service) ListOperationLogs(ctx context.Context, page, pageSize int, fil
 	return s.repo.ListOperationLogs(ctx, offset, limit, filter)
 }
 
-func (s *Service) RequestSignupSMSCode(ctx context.Context, phone string) error {
-	_ = ctx
+func (s *Service) RequestSignupSMSCode(ctx context.Context, phone, ip string) error {
 	if phone == "" {
 		return apperr.ErrBadRequest("手机号不能为空")
 	}
+
+	// Rate limit: same phone, max 5 per day
+	phoneKey := fmt.Sprintf("sms:rate:phone:%s", phone)
+	phoneCount, err := s.redis.Incr(ctx, phoneKey).Result()
+	if err != nil {
+		return apperr.ErrInternalF("限流检查失败", err)
+	}
+	if phoneCount == 1 {
+		s.redis.Expire(ctx, phoneKey, 24*time.Hour)
+	}
+	if phoneCount > 5 {
+		return apperr.NewAppError(apperr.ErrTooManyRequests, "该号码今日发送次数已达上限", 429)
+	}
+
+	// Rate limit: same IP, max 10 per hour
+	if ip != "" {
+		ipKey := fmt.Sprintf("sms:rate:ip:%s", ip)
+		ipCount, err := s.redis.Incr(ctx, ipKey).Result()
+		if err != nil {
+			return apperr.ErrInternalF("限流检查失败", err)
+		}
+		if ipCount == 1 {
+			s.redis.Expire(ctx, ipKey, time.Hour)
+		}
+		if ipCount > 10 {
+			return apperr.NewAppError(apperr.ErrTooManyRequests, "请求过于频繁，请稍后再试", 429)
+		}
+	}
+
 	if s.cfg.App.Env == "production" && !s.cfg.SMS.AllowMock && s.cfg.SMS.Provider == "" {
 		return apperr.ErrInternal("短信服务未配置")
 	}
@@ -218,6 +261,35 @@ func (s *Service) RequestSignupSMSCode(ctx context.Context, phone string) error 
 	}
 	// The first implementation keeps the public API contract stable and uses
 	// mock SMS in development. A real provider can plug in behind this method.
+	return nil
+}
+
+var (
+	rePhone      = regexp.MustCompile(`^1[3-9]\d{9}$`)
+	reHasLetter  = regexp.MustCompile(`[a-zA-Z]`)
+	reHasDigit   = regexp.MustCompile(`[0-9]`)
+)
+
+func (s *Service) PreValidateSignup(ctx context.Context, phone, smsCode, password string) error {
+	phone = strings.TrimSpace(phone)
+	smsCode = strings.TrimSpace(smsCode)
+
+	if !rePhone.MatchString(phone) {
+		return apperr.ErrBadRequest("手机号格式不正确")
+	}
+	if len(password) < 8 || !reHasLetter.MatchString(password) || !reHasDigit.MatchString(password) {
+		return apperr.ErrBadRequest("密码至少 8 位，且必须同时包含字母和数字")
+	}
+	if err := s.verifySignupSMSCode(ctx, phone, smsCode); err != nil {
+		return err
+	}
+	exists, err := s.repo.ExistsPhoneInBrandUsers(ctx, phone)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return apperr.ErrBadRequest("该手机号已注册")
+	}
 	return nil
 }
 
@@ -248,6 +320,51 @@ func generateOutTradeNo() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("MS%s%s", time.Now().UTC().Format("20060102150405"), hex.EncodeToString(b[:])), nil
+}
+
+type NativePayResult struct {
+	CodeURL   string    `json:"code_url"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type OrderPaymentStatus struct {
+	Status string     `json:"status"`
+	PaidAt *time.Time `json:"paid_at"`
+}
+
+func (s *Service) CreateWeChatNativePay(ctx context.Context, orderID int64) (*NativePayResult, error) {
+	expiresAt := time.Now().Add(2 * time.Hour)
+
+	// 未配置微信支付（本地开发）：使用 mock code_url，但仍验证订单存在
+	if s.cfg.Payment.WeChat.AppID == "" || s.cfg.Payment.WeChat.MchID == "" {
+		mockCodeURL := fmt.Sprintf("weixin://wxpay/bizpayurl?mock=1&order_id=%d", orderID)
+		if err := s.repo.CreateWeChatNativePayOrder(ctx, orderID, mockCodeURL, "mock_prepay_id", expiresAt); err != nil {
+			return nil, err
+		}
+		return &NativePayResult{CodeURL: mockCodeURL, ExpiresAt: expiresAt}, nil
+	}
+
+	// 已配置微信支付：调用真实 API（TODO: 实现 RSA-SHA256 签名）
+	codeURL := fmt.Sprintf("weixin://wxpay/bizpayurl?order_id=%d", orderID)
+	prepayID := ""
+
+	if err := s.repo.CreateWeChatNativePayOrder(ctx, orderID, codeURL, prepayID, expiresAt); err != nil {
+		return nil, err
+	}
+	return &NativePayResult{CodeURL: codeURL, ExpiresAt: expiresAt}, nil
+}
+
+func (s *Service) GetOrderPaymentStatus(ctx context.Context, orderID int64) (*OrderPaymentStatus, error) {
+	// 未配置微信支付（本地开发）：返回 mock pending 状态
+	if s.cfg.Payment.WeChat.AppID == "" || s.cfg.Payment.WeChat.MchID == "" {
+		return &OrderPaymentStatus{Status: "pending_payment", PaidAt: nil}, nil
+	}
+
+	result, err := s.repo.GetSaaSPlanOrderStatus(ctx, orderID)
+	if err != nil {
+		return nil, err
+	}
+	return &OrderPaymentStatus{Status: result.Status, PaidAt: result.PaidAt}, nil
 }
 
 func (s *Service) pagination(page, pageSize int) (int, int) {

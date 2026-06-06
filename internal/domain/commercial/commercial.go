@@ -87,6 +87,21 @@ const (
 	PaymentCallbackLogStatusIgnored   PaymentCallbackLogStatus = "ignored"
 )
 
+// PaymentCallbackReplayWindow 微信回调时间戳允许的偏差窗口（防重放）
+const PaymentCallbackReplayWindow = 5 * time.Minute
+
+// 微信交易状态（v3 trade_state）
+type WeChatTradeState string
+
+const (
+	WeChatTradeStateSuccess    WeChatTradeState = "SUCCESS"
+	WeChatTradeStateUserPaying WeChatTradeState = "USERPAYING"
+	WeChatTradeStateClosed     WeChatTradeState = "CLOSED"
+	WeChatTradeStatePayError   WeChatTradeState = "PAYERROR"
+	WeChatTradeStateRevoked    WeChatTradeState = "REVOKED"
+	WeChatTradeStateNotPay     WeChatTradeState = "NOTPAY"
+)
+
 type SaaSPlan struct {
 	ID                int64             `json:"id"`
 	Name              string            `json:"name"`

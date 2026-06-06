@@ -16,6 +16,7 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/persistence"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/app"
+	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 	"gorm.io/gorm"
 	"log/slog"
 )
@@ -76,6 +77,7 @@ func newAppRouter(
 	}
 
 	r := gin.New()
+	r.Use(middleware.Locale())
 	r.Use(gin.Recovery())
 
 	api := r.Group("/api/v1/app")

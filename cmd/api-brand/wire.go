@@ -12,13 +12,17 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
+	commercialapp "github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
+	"github.com/zkw/mini-schedule/backend/internal/infrastructure/payment"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/persistence"
+	adminHandler "github.com/zkw/mini-schedule/backend/internal/interfaces/admin"
 	brandHandler "github.com/zkw/mini-schedule/backend/internal/interfaces/brand"
+	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 )
 
 // Provider 函数：从 Config 提取子配置
@@ -46,6 +50,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewDatabase,
 		cache.NewRedisClient,
 		cache.NewService,
+		payment.NewWeChatPaymentAdapter,
 
 		// 仓储
 		persistence.NewBrandRepository,
@@ -71,6 +76,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 
 func newBrandRouter(
 	h *brandHandler.Handler,
+	ph *adminHandler.Handler,
 	db *gorm.DB,
 	redisClient *redis.Client,
 	jwtSvc *cache.Service,
@@ -83,7 +89,13 @@ func newBrandRouter(
 	}
 
 	r := gin.New()
+	r.Use(middleware.CORS(cfg.CORS))
+	r.Use(middleware.Locale())
 	r.Use(gin.Recovery())
+
+	// 公开路由（注册、支付）
+	publicAPI := r.Group("/api/v1/public")
+	ph.RegisterPublicRoutes(publicAPI)
 
 	// 品牌端路由
 	api := r.Group("/api/v1/brand")

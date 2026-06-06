@@ -10,13 +10,17 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
+	commercialapp "github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
+	"github.com/zkw/mini-schedule/backend/internal/infrastructure/payment"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/persistence"
+	adminHandler "github.com/zkw/mini-schedule/backend/internal/interfaces/admin"
 	brand2 "github.com/zkw/mini-schedule/backend/internal/interfaces/brand"
+	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 	"gorm.io/gorm"
 	"log/slog"
 )
@@ -43,12 +47,17 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	trainingRepository := persistence.NewTrainingRepository(db)
 	trainingService := training.NewService(trainingRepository, cfg)
 	handler := brand2.NewHandler(service, brandUserService, appUserService, courseService, trainingService, cacheService)
+	commercialRepository := persistence.NewCommercialRepository(db)
 	redisConfig := provideRedisConfig(cfg)
 	client, err := cache.NewRedisClient(redisConfig, log)
 	if err != nil {
 		return nil, nil, err
 	}
-	engine := newBrandRouter(handler, db, client, cacheService, cfg, log)
+	// TODO wire regen: 微信支付 adapter 已加入 commercial.Service，请运行 `go generate ./...`
+	wechatAdapter := payment.NewWeChatPaymentAdapter(cfg)
+	commercialSvc := commercialapp.NewService(commercialRepository, cfg, client, wechatAdapter)
+	publicHandler := adminHandler.NewHandler(nil, commercialSvc, nil, nil)
+	engine := newBrandRouter(handler, publicHandler, db, client, cacheService, cfg, log)
 	return engine, func() {
 	}, nil
 }
@@ -70,6 +79,7 @@ func provideJWTConfig(cfg *config.Config) *config.JWTConfig {
 
 func newBrandRouter(
 	h *brand2.Handler,
+	ph *adminHandler.Handler,
 	db *gorm.DB,
 	redisClient *redis.Client,
 	jwtSvc *cache.Service,
@@ -82,7 +92,12 @@ func newBrandRouter(
 	}
 
 	r := gin.New()
+	r.Use(middleware.CORS(cfg.CORS))
+	r.Use(middleware.Locale())
 	r.Use(gin.Recovery())
+
+	publicAPI := r.Group("/api/v1/public")
+	ph.RegisterPublicRoutes(publicAPI)
 
 	api := r.Group("/api/v1/brand")
 	h.RegisterRoutes(api)

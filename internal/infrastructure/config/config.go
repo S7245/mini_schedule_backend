@@ -111,6 +111,9 @@ type WeChatPayConfig struct {
 	SerialNo       string `mapstructure:"serial_no"`
 	PrivateKeyPath string `mapstructure:"private_key_path"`
 	NotifyURL      string `mapstructure:"notify_url"`
+	// AllowMock 为 true 时，回调验签使用 mock 路径（开发 / 本地 / CI 友好）。
+	// 真实生产环境务必置为 false，并接入真实证书与 AES-GCM 解密。
+	AllowMock bool `mapstructure:"allow_mock"`
 }
 
 // Load 加载配置，支持配置文件 + 环境变量覆盖
@@ -133,11 +136,13 @@ func Load(configPath string) (*Config, error) {
 		"database.password", "database.dbname", "database.ssl_mode",
 		"redis.addr", "redis.password", "redis.db",
 		"jwt.secret", "jwt.expire", "jwt.refresh_expire",
+		"cors.allowed_origins",
 		"app.env", "app.debug",
 		"log.level", "log.format",
 		"sms.provider", "sms.mock_code", "sms.allow_mock", "sms.expire_minutes",
 		"payment.wechat.app_id", "payment.wechat.mch_id", "payment.wechat.api_v3_key",
 		"payment.wechat.serial_no", "payment.wechat.private_key_path", "payment.wechat.notify_url",
+		"payment.wechat.allow_mock",
 	}
 	for _, key := range keysToBind {
 		_ = v.BindEnv(key)

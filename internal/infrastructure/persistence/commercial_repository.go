@@ -3,6 +3,9 @@ package persistence
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/zkw/mini-schedule/backend/internal/domain/commercial"
@@ -623,6 +626,43 @@ func (r *commercialRepository) GetPlatformSummary(ctx context.Context) (*commerc
 	return &summary, nil
 }
 
+func (r *commercialRepository) CreateWeChatNativePayOrder(ctx context.Context, orderID int64, codeURL, prepayID string, expiresAt time.Time) error {
+	result := r.db.WithContext(ctx).Model(&SaaSPlanOrderModel{}).
+		Where("id = ? AND status = ?", orderID, "pending_payment").
+		Updates(map[string]interface{}{
+			"wechat_code_url":    codeURL,
+			"wechat_prepay_id":   prepayID,
+			"payment_expires_at": expiresAt,
+		})
+	if result.Error != nil {
+		return apperr.ErrInternalF("保存支付下单结果失败", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return apperr.ErrNotFoundF(apperr.ErrNotFound, "订单不存在或状态不符")
+	}
+	return nil
+}
+
+func (r *commercialRepository) GetSaaSPlanOrderStatus(ctx context.Context, orderID int64) (*commercial.SaaSPlanOrderStatusResult, error) {
+	var m SaaSPlanOrderModel
+	if err := r.db.WithContext(ctx).Select("status", "paid_at").First(&m, orderID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, apperr.ErrNotFoundF(apperr.ErrNotFound, "订单不存在")
+		}
+		return nil, apperr.ErrInternalF("查询订单状态失败", err)
+	}
+	return &commercial.SaaSPlanOrderStatusResult{Status: m.Status, PaidAt: m.PaidAt}, nil
+}
+
+func (r *commercialRepository) ExistsPhoneInBrandUsers(ctx context.Context, phone string) (bool, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&BrandUserModel{}).Where("phone = ?", phone).Count(&count).Error
+	if err != nil {
+		return false, apperr.ErrInternalF("查询手机号失败", err)
+	}
+	return count > 0, nil
+}
+
 func toSaaSPlanDomains(models []SaaSPlanModel) []*commercial.SaaSPlan {
 	items := make([]*commercial.SaaSPlan, len(models))
 	for i := range models {
@@ -821,4 +861,461 @@ func mapBrandSubscriptionError(message string, err error) error {
 		return apperr.ErrNotFoundF(apperr.ErrNotFound, "品牌订阅不存在")
 	}
 	return apperr.ErrInternalF(message, err)
+}
+
+// WritePaymentCallbackLog 在事务外写入一条 CallbackLog（用于验签失败 / 事务回滚补偿场景）。
+func (r *commercialRepository) WritePaymentCallbackLog(ctx context.Context, log commercial.PaymentCallbackLog) error {
+	model := PaymentCallbackLogModel{
+		BrandID:           log.BrandID,
+		OrderID:           log.OrderID,
+		TransactionID:     log.TransactionID,
+		PaymentChannel:    string(log.PaymentChannel),
+		OutTradeNo:        log.OutTradeNo,
+		ThirdPartyTradeNo: log.ThirdPartyTradeNo,
+		CallbackRequestID: log.CallbackRequestID,
+		Status:            string(log.Status),
+		ProcessedAt:       log.ProcessedAt,
+		ErrorMessage:      log.ErrorMessage,
+	}
+	if model.PaymentChannel == "" {
+		model.PaymentChannel = string(commercial.PaymentChannelWeChat)
+	}
+	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
+		return apperr.ErrInternalF("写入支付回调日志失败", err)
+	}
+	return nil
+}
+
+// ProcessWeChatCallback 在单个事务中推进订单状态机，并按需创建 Subscription / Transaction / OperationLog。
+// 详细业务流程见 pds/batches/batch-03-wechat-callback.md。
+func (r *commercialRepository) ProcessWeChatCallback(ctx context.Context, input commercial.ProcessWeChatCallbackInput) (*commercial.ProcessWeChatCallbackResult, error) {
+	result := &commercial.ProcessWeChatCallbackResult{}
+
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 1) 锁订单
+		var order SaaSPlanOrderModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("out_trade_no = ?", input.OutTradeNo).
+			First(&order).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				// 订单不存在：写一条 ignored 日志（CallbackLog 在事务内即可，因为我们后面 commit 而非 rollback）
+				logModel := buildCallbackLogModel(input, nil, nil, nil, commercial.PaymentCallbackLogStatusIgnored, "order not found")
+				if err := tx.Create(&logModel).Error; err != nil {
+					return apperr.ErrInternalF("写入回调日志失败", err)
+				}
+				result.Success = false
+				result.Message = "order not found"
+				result.CallbackLogStatus = commercial.PaymentCallbackLogStatusIgnored
+				return nil
+			}
+			return apperr.ErrInternalF("查询订单失败", err)
+		}
+
+		orderIDPtr := order.ID
+		brandIDPtr := order.BrandID
+
+		// 2) 幂等：订单已 paid 且 third_party_trade_no 匹配 → 写 processed 日志
+		if order.Status == string(commercial.SaaSPlanOrderStatusPaid) {
+			// 同一笔成功回调重放：幂等成功
+			logModel := buildCallbackLogModel(input, &orderIDPtr, &brandIDPtr, nil, commercial.PaymentCallbackLogStatusProcessed, "")
+			now := input.ReceivedAt
+			logModel.ProcessedAt = &now
+			if err := tx.Create(&logModel).Error; err != nil {
+				return apperr.ErrInternalF("写入回调日志失败", err)
+			}
+			result.Success = true
+			result.OrderID = order.ID
+			result.BrandID = order.BrandID
+			result.Message = "idempotent"
+			result.CallbackLogStatus = commercial.PaymentCallbackLogStatusProcessed
+			return nil
+		}
+
+		// 3) 订单已终结但不是 paid：closed / failed / exception / refunded → 忽略
+		if isTerminalOrderStatus(order.Status) {
+			msg := fmt.Sprintf("order status: %s", order.Status)
+			logModel := buildCallbackLogModel(input, &orderIDPtr, &brandIDPtr, nil, commercial.PaymentCallbackLogStatusIgnored, msg)
+			if err := tx.Create(&logModel).Error; err != nil {
+				return apperr.ErrInternalF("写入回调日志失败", err)
+			}
+			result.Success = false
+			result.OrderID = order.ID
+			result.BrandID = order.BrandID
+			result.Message = "order not in pending_payment: " + order.Status
+			result.CallbackLogStatus = commercial.PaymentCallbackLogStatusIgnored
+			return nil
+		}
+
+		// 4) 校验 trade_state
+		switch input.TradeState {
+		case commercial.WeChatTradeStateSuccess:
+			// 继续往下处理 happy path
+		case commercial.WeChatTradeStateClosed:
+			now := input.ReceivedAt
+			if err := tx.Model(&SaaSPlanOrderModel{}).
+				Where("id = ?", order.ID).
+				Updates(map[string]interface{}{
+					"status":    string(commercial.SaaSPlanOrderStatusClosed),
+					"closed_at": now,
+				}).Error; err != nil {
+				return apperr.ErrInternalF("更新订单为 closed 失败", err)
+			}
+			logModel := buildCallbackLogModel(input, &orderIDPtr, &brandIDPtr, nil, commercial.PaymentCallbackLogStatusProcessed, "trade_state=CLOSED")
+			logModel.ProcessedAt = &now
+			if err := tx.Create(&logModel).Error; err != nil {
+				return apperr.ErrInternalF("写入回调日志失败", err)
+			}
+			result.Success = false
+			result.OrderID = order.ID
+			result.BrandID = order.BrandID
+			result.Message = "order closed by wechat"
+			result.CallbackLogStatus = commercial.PaymentCallbackLogStatusProcessed
+			return nil
+		case commercial.WeChatTradeStatePayError:
+			now := input.ReceivedAt
+			if err := tx.Model(&SaaSPlanOrderModel{}).
+				Where("id = ?", order.ID).
+				Updates(map[string]interface{}{
+					"status":         string(commercial.SaaSPlanOrderStatusFailed),
+					"failure_reason": "wechat trade_state=PAYERROR",
+				}).Error; err != nil {
+				return apperr.ErrInternalF("更新订单为 failed 失败", err)
+			}
+			logModel := buildCallbackLogModel(input, &orderIDPtr, &brandIDPtr, nil, commercial.PaymentCallbackLogStatusProcessed, "trade_state=PAYERROR")
+			logModel.ProcessedAt = &now
+			if err := tx.Create(&logModel).Error; err != nil {
+				return apperr.ErrInternalF("写入回调日志失败", err)
+			}
+			result.Success = false
+			result.OrderID = order.ID
+			result.BrandID = order.BrandID
+			result.Message = "wechat trade_state=PAYERROR"
+			result.CallbackLogStatus = commercial.PaymentCallbackLogStatusProcessed
+			return nil
+		default:
+			msg := fmt.Sprintf("non-success trade_state: %s", input.TradeState)
+			logModel := buildCallbackLogModel(input, &orderIDPtr, &brandIDPtr, nil, commercial.PaymentCallbackLogStatusIgnored, msg)
+			if err := tx.Create(&logModel).Error; err != nil {
+				return apperr.ErrInternalF("写入回调日志失败", err)
+			}
+			result.Success = false
+			result.OrderID = order.ID
+			result.BrandID = order.BrandID
+			result.Message = msg
+			result.CallbackLogStatus = commercial.PaymentCallbackLogStatusIgnored
+			return nil
+		}
+
+		// 5) 金额 / 币种校验
+		orderAmountFen, parseErr := parseAmountToFen(order.Amount)
+		if parseErr != nil {
+			return apperr.ErrInternalF("解析订单金额失败", parseErr)
+		}
+		expectedCurrency := strings.ToUpper(order.Currency)
+		if expectedCurrency == "" {
+			expectedCurrency = "CNY"
+		}
+		actualCurrency := strings.ToUpper(input.Currency)
+		if actualCurrency == "" {
+			actualCurrency = "CNY"
+		}
+
+		if input.Amount != orderAmountFen || actualCurrency != expectedCurrency {
+			errMsg := fmt.Sprintf(
+				"amount mismatch: expected %d %s, got %d %s",
+				orderAmountFen, expectedCurrency, input.Amount, actualCurrency,
+			)
+			if err := tx.Model(&SaaSPlanOrderModel{}).
+				Where("id = ?", order.ID).
+				Updates(map[string]interface{}{
+					"status":         string(commercial.SaaSPlanOrderStatusException),
+					"failure_reason": errMsg,
+				}).Error; err != nil {
+				return apperr.ErrInternalF("更新订单为 exception 失败", err)
+			}
+			logModel := buildCallbackLogModel(input, &orderIDPtr, &brandIDPtr, nil, commercial.PaymentCallbackLogStatusFailed, errMsg)
+			if err := tx.Create(&logModel).Error; err != nil {
+				return apperr.ErrInternalF("写入回调日志失败", err)
+			}
+			// OperationLog: payment_amount_mismatch
+			meta, _ := json.Marshal(map[string]interface{}{
+				"expected_amount_fen": orderAmountFen,
+				"expected_currency":   expectedCurrency,
+				"actual_amount_fen":   input.Amount,
+				"actual_currency":     actualCurrency,
+				"out_trade_no":        order.OutTradeNo,
+				"third_party_trade_no": input.ThirdPartyTradeNo,
+			})
+			targetID := order.ID
+			if err := tx.Create(&OperationLogModel{
+				BrandID:    &order.BrandID,
+				ActorType:  "system",
+				Action:     "payment_amount_mismatch",
+				TargetType: "saas_plan_order",
+				TargetID:   &targetID,
+				Reason:     errMsg,
+				Metadata:   meta,
+			}).Error; err != nil {
+				return apperr.ErrInternalF("写入操作日志失败", err)
+			}
+			result.Success = false
+			result.OrderID = order.ID
+			result.BrandID = order.BrandID
+			result.Message = errMsg
+			result.CallbackLogStatus = commercial.PaymentCallbackLogStatusFailed
+			return nil
+		}
+
+		// 6) Happy path
+		// 6.1 取 plan 信息以便计算订阅周期 / 创建 BrandSubscription
+		var plan SaaSPlanModel
+		if err := tx.Preload("Features").First(&plan, order.PlanID).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return apperr.ErrNotFoundF(apperr.ErrNotFound, "套餐不存在")
+			}
+			return apperr.ErrInternalF("查询套餐失败", err)
+		}
+
+		now := input.ReceivedAt
+		successTime := now
+		if input.SuccessTime != nil {
+			successTime = *input.SuccessTime
+		}
+
+		// 6.2 先写 CallbackLog(received)，拿 id
+		callbackLog := buildCallbackLogModel(input, &orderIDPtr, &brandIDPtr, nil, commercial.PaymentCallbackLogStatusReceived, "")
+		if err := tx.Create(&callbackLog).Error; err != nil {
+			return apperr.ErrInternalF("写入回调日志失败", err)
+		}
+
+		// 6.3 写 PaymentTransaction(succeeded)
+		amountStr := fenToAmountString(input.Amount)
+		txModel := PaymentTransactionModel{
+			BrandID:            &order.BrandID,
+			OrderID:            &order.ID,
+			PaymentChannel:     string(input.PaymentChannel),
+			TransactionType:    string(commercial.PaymentTransactionTypePayment),
+			Status:             string(commercial.PaymentTransactionStatusSucceeded),
+			Amount:             amountStr,
+			Currency:           actualCurrency,
+			OutTradeNo:         input.OutTradeNo,
+			ThirdPartyTradeNo:  input.ThirdPartyTradeNo,
+			ProviderRequestID:  input.CallbackRequestID,
+			CallbackReceivedAt: &now,
+			PaidAt:             &successTime,
+		}
+		if txModel.PaymentChannel == "" {
+			txModel.PaymentChannel = string(commercial.PaymentChannelWeChat)
+		}
+		if err := tx.Create(&txModel).Error; err != nil {
+			return apperr.ErrInternalF("写入支付流水失败", err)
+		}
+
+		// 6.4 更新订单为 paid
+		orderUpdates := map[string]interface{}{
+			"status":               string(commercial.SaaSPlanOrderStatusPaid),
+			"paid_at":              successTime,
+			"third_party_trade_no": input.ThirdPartyTradeNo,
+		}
+		if err := tx.Model(&SaaSPlanOrderModel{}).
+			Where("id = ?", order.ID).
+			Updates(orderUpdates).Error; err != nil {
+			return apperr.ErrInternalF("更新订单为 paid 失败", err)
+		}
+
+		// 6.5 创建 BrandSubscription（按 billing_cycle 计算到期时间）
+		startsAt := now
+		expiresAt, cycleErr := computeSubscriptionExpiry(startsAt, commercial.BillingCycle(order.BillingCycle))
+		if cycleErr != nil {
+			return cycleErr
+		}
+		subModel := BrandSubscriptionModel{
+			BrandID:       order.BrandID,
+			PlanID:        plan.ID,
+			OrderID:       &order.ID,
+			BillingCycle:  order.BillingCycle,
+			Status:        string(commercial.BrandSubscriptionStatusActive),
+			StartsAt:      startsAt,
+			ExpiresAt:     expiresAt,
+			MaxLocations:  plan.MaxLocations,
+			MaxStaffSeats: plan.MaxStaffSeats,
+			MaxLearners:   plan.MaxLearners,
+		}
+		if err := tx.Create(&subModel).Error; err != nil {
+			return apperr.ErrInternalF("创建品牌订阅失败", err)
+		}
+		// 把 plan features 复制为 subscription features
+		for _, f := range plan.Features {
+			if err := tx.Create(&BrandSubscriptionFeatureModel{
+				SubscriptionID: subModel.ID,
+				FeatureCode:    f.FeatureCode,
+				Enabled:        f.Enabled,
+			}).Error; err != nil {
+				return apperr.ErrInternalF("写入订阅功能快照失败", err)
+			}
+		}
+
+		// 6.6 激活 Brand（仅当当前为 pending）
+		if err := tx.Model(&BrandModel{}).
+			Where("id = ? AND status = ?", order.BrandID, "pending").
+			Update("status", "active").Error; err != nil {
+			return apperr.ErrInternalF("激活品牌失败", err)
+		}
+
+		// 6.7 更新 CallbackLog → processed，回填 transaction_id
+		txIDPtr := txModel.ID
+		if err := tx.Model(&PaymentCallbackLogModel{}).
+			Where("id = ?", callbackLog.ID).
+			Updates(map[string]interface{}{
+				"status":         string(commercial.PaymentCallbackLogStatusProcessed),
+				"processed_at":   now,
+				"transaction_id": &txIDPtr,
+			}).Error; err != nil {
+			return apperr.ErrInternalF("更新回调日志失败", err)
+		}
+
+		// 6.8 写 OperationLog
+		meta, _ := json.Marshal(map[string]interface{}{
+			"order_id":             order.ID,
+			"transaction_id":       txModel.ID,
+			"subscription_id":      subModel.ID,
+			"amount_fen":           input.Amount,
+			"currency":             actualCurrency,
+			"third_party_trade_no": input.ThirdPartyTradeNo,
+		})
+		targetID := order.ID
+		if err := tx.Create(&OperationLogModel{
+			BrandID:    &order.BrandID,
+			ActorType:  "system",
+			Action:     "payment_callback_success",
+			TargetType: "saas_plan_order",
+			TargetID:   &targetID,
+			Metadata:   meta,
+		}).Error; err != nil {
+			return apperr.ErrInternalF("写入操作日志失败", err)
+		}
+
+		result.Success = true
+		result.OrderID = order.ID
+		result.BrandID = order.BrandID
+		result.SubscriptionID = subModel.ID
+		result.Message = "ok"
+		result.CallbackLogStatus = commercial.PaymentCallbackLogStatusProcessed
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func buildCallbackLogModel(
+	input commercial.ProcessWeChatCallbackInput,
+	orderID *int64,
+	brandID *int64,
+	transactionID *int64,
+	status commercial.PaymentCallbackLogStatus,
+	errMsg string,
+) PaymentCallbackLogModel {
+	channel := string(input.PaymentChannel)
+	if channel == "" {
+		channel = string(commercial.PaymentChannelWeChat)
+	}
+	return PaymentCallbackLogModel{
+		BrandID:           brandID,
+		OrderID:           orderID,
+		TransactionID:     transactionID,
+		PaymentChannel:    channel,
+		OutTradeNo:        input.OutTradeNo,
+		ThirdPartyTradeNo: input.ThirdPartyTradeNo,
+		CallbackRequestID: input.CallbackRequestID,
+		Status:            string(status),
+		ErrorMessage:      errMsg,
+		RawBody:           input.RawPayload,
+	}
+}
+
+func isTerminalOrderStatus(status string) bool {
+	switch commercial.SaaSPlanOrderStatus(status) {
+	case commercial.SaaSPlanOrderStatusClosed,
+		commercial.SaaSPlanOrderStatusFailed,
+		commercial.SaaSPlanOrderStatusException,
+		commercial.SaaSPlanOrderStatusRefunding,
+		commercial.SaaSPlanOrderStatusRefunded:
+		return true
+	}
+	return false
+}
+
+// parseAmountToFen 把 numeric(12,2) 字符串（如 "99.00"、"99"、"99.5"）转成 int64 分。
+func parseAmountToFen(amount string) (int64, error) {
+	amount = strings.TrimSpace(amount)
+	if amount == "" {
+		return 0, fmt.Errorf("empty amount")
+	}
+	neg := false
+	if strings.HasPrefix(amount, "-") {
+		neg = true
+		amount = amount[1:]
+	}
+	parts := strings.SplitN(amount, ".", 2)
+	yuan, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid integer part: %w", err)
+	}
+	var cents int64
+	if len(parts) == 2 {
+		frac := parts[1]
+		switch {
+		case len(frac) == 0:
+			cents = 0
+		case len(frac) == 1:
+			d, err := strconv.ParseInt(frac, 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid fractional part: %w", err)
+			}
+			cents = d * 10
+		default:
+			// 取前 2 位，多余截断
+			d, err := strconv.ParseInt(frac[:2], 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid fractional part: %w", err)
+			}
+			cents = d
+		}
+	}
+	total := yuan*100 + cents
+	if neg {
+		total = -total
+	}
+	return total, nil
+}
+
+// fenToAmountString 把 int64 分转成 "x.yz" 字符串，便于写入 numeric(12,2)。
+func fenToAmountString(fen int64) string {
+	neg := false
+	if fen < 0 {
+		neg = true
+		fen = -fen
+	}
+	yuan := fen / 100
+	cents := fen % 100
+	s := fmt.Sprintf("%d.%02d", yuan, cents)
+	if neg {
+		s = "-" + s
+	}
+	return s
+}
+
+// computeSubscriptionExpiry 根据 billing_cycle 推算订阅到期时间。
+func computeSubscriptionExpiry(startsAt time.Time, cycle commercial.BillingCycle) (time.Time, error) {
+	switch cycle {
+	case commercial.BillingCycleMonthly:
+		return startsAt.AddDate(0, 1, 0), nil
+	case commercial.BillingCycleYearly:
+		return startsAt.AddDate(1, 0, 0), nil
+	default:
+		return time.Time{}, apperr.ErrInternal("未知的计费周期: " + string(cycle))
+	}
 }

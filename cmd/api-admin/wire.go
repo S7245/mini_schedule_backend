@@ -18,6 +18,7 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
+	"github.com/zkw/mini-schedule/backend/internal/infrastructure/payment"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/persistence"
 	adminHandler "github.com/zkw/mini-schedule/backend/internal/interfaces/admin"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
@@ -45,6 +46,7 @@ func initializeAdminApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewDatabase,
 		cache.NewRedisClient,
 		cache.NewService,
+		payment.NewWeChatPaymentAdapter,
 
 		persistence.NewBrandRepository,
 		persistence.NewCommercialRepository,

@@ -16,6 +16,7 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
+	"github.com/zkw/mini-schedule/backend/internal/infrastructure/payment"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/persistence"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/admin"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
@@ -35,17 +36,19 @@ func initializeAdminApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	repository := persistence.NewBrandRepository(db)
 	service := brand.NewService(repository, cfg)
 	commercialRepository := persistence.NewCommercialRepository(db)
-	commercialService := commercial.NewService(commercialRepository, cfg)
 	adminUserRepository := persistence.NewAdminUserRepository(db)
 	jwtConfig := provideJWTConfig(cfg)
 	cacheService := cache.NewService(jwtConfig)
 	adminUserService := user.NewAdminUserService(adminUserRepository, cacheService, log, cfg)
-	handler := admin.NewHandler(service, commercialService, adminUserService, cacheService)
 	redisConfig := provideRedisConfig(cfg)
 	client, err := cache.NewRedisClient(redisConfig, log)
 	if err != nil {
 		return nil, nil, err
 	}
+	// TODO wire regen: 微信支付 adapter 已加入 commercial.Service，请运行 `go generate ./...`
+	wechatAdapter := payment.NewWeChatPaymentAdapter(cfg)
+	commercialService := commercial.NewService(commercialRepository, cfg, client, wechatAdapter)
+	handler := admin.NewHandler(service, commercialService, adminUserService, cacheService)
 	engine := newAdminRouter(handler, db, client, cacheService, cfg, log)
 	return engine, func() {
 	}, nil
