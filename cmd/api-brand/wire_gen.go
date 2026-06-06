@@ -10,19 +10,26 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
-	commercialapp "github.com/zkw/mini-schedule/backend/internal/application/commercial"
+	"github.com/zkw/mini-schedule/backend/internal/application/brandprofile"
+	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
+	"github.com/zkw/mini-schedule/backend/internal/application/location"
+	"github.com/zkw/mini-schedule/backend/internal/application/onboarding"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/payment"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/persistence"
-	adminHandler "github.com/zkw/mini-schedule/backend/internal/interfaces/admin"
+	"github.com/zkw/mini-schedule/backend/internal/interfaces/admin"
 	brand2 "github.com/zkw/mini-schedule/backend/internal/interfaces/brand"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 	"gorm.io/gorm"
 	"log/slog"
+)
+
+import (
+	_ "github.com/zkw/mini-schedule/backend/docs/brand"
 )
 
 // Injectors from wire.go:
@@ -46,23 +53,41 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	courseService := course.NewService(courseRepository, cfg)
 	trainingRepository := persistence.NewTrainingRepository(db)
 	trainingService := training.NewService(trainingRepository, cfg)
-	handler := brand2.NewHandler(service, brandUserService, appUserService, courseService, trainingService, cacheService)
+	onboardingRepository := persistence.NewOnboardingRepository(db)
+	onboardingService := onboarding.NewService(onboardingRepository)
+	onboardingHandler := brand2.NewOnboardingHandler(onboardingService)
+	brandProfileRepository := persistence.NewBrandProfileRepository(db)
+	brandprofileService := brandprofile.NewService(brandProfileRepository)
+	profileHandler := brand2.NewProfileHandler(brandprofileService)
+	locationRepository := persistence.NewLocationRepository(db)
+	locationService := location.NewService(locationRepository)
+	locationHandler := brand2.NewLocationHandler(locationService)
+	handler := brand2.NewHandler(service, brandUserService, appUserService, courseService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler)
 	commercialRepository := persistence.NewCommercialRepository(db)
 	redisConfig := provideRedisConfig(cfg)
 	client, err := cache.NewRedisClient(redisConfig, log)
 	if err != nil {
 		return nil, nil, err
 	}
-	// TODO wire regen: 微信支付 adapter 已加入 commercial.Service，请运行 `go generate ./...`
-	wechatAdapter := payment.NewWeChatPaymentAdapter(cfg)
-	commercialSvc := commercialapp.NewService(commercialRepository, cfg, client, wechatAdapter)
-	publicHandler := adminHandler.NewHandler(nil, commercialSvc, nil, nil)
-	engine := newBrandRouter(handler, publicHandler, db, client, cacheService, cfg, log)
+	weChatPaymentAdapter := payment.NewWeChatPaymentAdapter(cfg)
+	commercialService := commercial.NewService(commercialRepository, cfg, client, weChatPaymentAdapter)
+	adminHandler := providePublicHandler(commercialService)
+	engine := newBrandRouter(handler, adminHandler, db, client, cacheService, cfg, log)
 	return engine, func() {
 	}, nil
 }
 
 // wire.go:
+
+// providePublicHandler 在 brand 进程内复用 admin.Handler 的 RegisterPublicRoutes。
+//
+// 受 backend/.learnings deep dive 提醒，这里 brand/admin 的 NewHandler 是不同签名，
+// 直接用 admin.NewHandler 需要传 brand.Service / admin user service 等不属于 brand 端语义的
+// 依赖（之前 wire_gen 把它们注入了 nil）。本 provider 集中容纳这层适配，方便后续重构成
+// 独立 PublicHandler。
+func providePublicHandler(commercialSvc *commercial.Service) *admin.Handler {
+	return admin.NewHandler(nil, commercialSvc, nil, nil)
+}
 
 // Provider 函数：从 Config 提取子配置
 func provideDatabaseConfig(cfg *config.Config) *config.DatabaseConfig {
@@ -79,7 +104,7 @@ func provideJWTConfig(cfg *config.Config) *config.JWTConfig {
 
 func newBrandRouter(
 	h *brand2.Handler,
-	ph *adminHandler.Handler,
+	ph *admin.Handler,
 	db *gorm.DB,
 	redisClient *redis.Client,
 	jwtSvc *cache.Service,

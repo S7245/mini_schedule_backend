@@ -12,8 +12,11 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
+	"github.com/zkw/mini-schedule/backend/internal/application/brandprofile"
 	commercialapp "github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
+	appLocation "github.com/zkw/mini-schedule/backend/internal/application/location"
+	appOnboarding "github.com/zkw/mini-schedule/backend/internal/application/onboarding"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
@@ -24,6 +27,16 @@ import (
 	brandHandler "github.com/zkw/mini-schedule/backend/internal/interfaces/brand"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 )
+
+// providePublicHandler 在 brand 进程内复用 admin.Handler 的 RegisterPublicRoutes。
+//
+// 受 backend/.learnings deep dive 提醒，这里 brand/admin 的 NewHandler 是不同签名，
+// 直接用 admin.NewHandler 需要传 brand.Service / admin user service 等不属于 brand 端语义的
+// 依赖（之前 wire_gen 把它们注入了 nil）。本 provider 集中容纳这层适配，方便后续重构成
+// 独立 PublicHandler。
+func providePublicHandler(commercialSvc *commercialapp.Service) *adminHandler.Handler {
+	return adminHandler.NewHandler(nil, commercialSvc, nil, nil)
+}
 
 // Provider 函数：从 Config 提取子配置
 func provideDatabaseConfig(cfg *config.Config) *config.DatabaseConfig {
@@ -58,6 +71,10 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewAppUserRepository,
 		persistence.NewCourseRepository,
 		persistence.NewTrainingRepository,
+		persistence.NewCommercialRepository,
+		persistence.NewOnboardingRepository,
+		persistence.NewLocationRepository,
+		persistence.NewBrandProfileRepository,
 
 		// 应用服务
 		brand.NewService,
@@ -65,9 +82,17 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		user.NewAppUserService,
 		course.NewService,
 		training.NewService,
+		commercialapp.NewService,
+		appOnboarding.NewService,
+		appLocation.NewService,
+		brandprofile.NewService,
 
 		// Handler
 		brandHandler.NewHandler,
+		brandHandler.NewOnboardingHandler,
+		brandHandler.NewProfileHandler,
+		brandHandler.NewLocationHandler,
+		providePublicHandler,
 
 		// 路由
 		newBrandRouter,

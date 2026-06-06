@@ -5,18 +5,18 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-playground/validator/v10"
 
 	brandapp "github.com/zkw/mini-schedule/backend/internal/application/brand"
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
-	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	coursedomain "github.com/zkw/mini-schedule/backend/internal/domain/course"
-	domainuser "github.com/zkw/mini-schedule/backend/internal/domain/user"
 	trainingdomain "github.com/zkw/mini-schedule/backend/internal/domain/training"
+	domainuser "github.com/zkw/mini-schedule/backend/internal/domain/user"
+	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 	"github.com/zkw/mini-schedule/backend/pkg/response"
+	"github.com/zkw/mini-schedule/backend/pkg/validation"
 )
 
 // Handler 品牌商家后台 Handler
@@ -27,7 +27,12 @@ type Handler struct {
 	courseSvc    *course.Service
 	trainingSvc  *training.Service
 	jwtSvc       *cache.Service
-	validator    *validator.Validate
+	validator    *validation.Validator
+
+	// Batch 4 — 子 handler，按域拆分
+	onboarding *OnboardingHandler
+	profile    *ProfileHandler
+	location   *LocationHandler
 }
 
 // NewHandler 创建品牌 Handler
@@ -38,6 +43,9 @@ func NewHandler(
 	courseSvc *course.Service,
 	trainingSvc *training.Service,
 	jwtSvc *cache.Service,
+	onboarding *OnboardingHandler,
+	profile *ProfileHandler,
+	location *LocationHandler,
 ) *Handler {
 	return &Handler{
 		brandSvc:     brandSvc,
@@ -46,7 +54,10 @@ func NewHandler(
 		courseSvc:    courseSvc,
 		trainingSvc:  trainingSvc,
 		jwtSvc:       jwtSvc,
-		validator:    validator.New(),
+		validator:    validation.New(),
+		onboarding:   onboarding,
+		profile:      profile,
+		location:     location,
 	}
 }
 
@@ -77,6 +88,17 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 
 		// 训练记录
 		auth.GET("/trainings", h.listTrainings)
+
+		// Batch 4 — 品牌资料 / onboarding / 门店
+		if h.profile != nil {
+			h.profile.RegisterRoutes(auth)
+		}
+		if h.onboarding != nil {
+			h.onboarding.RegisterRoutes(auth)
+		}
+		if h.location != nil {
+			h.location.RegisterRoutes(auth)
+		}
 	}
 }
 
@@ -88,8 +110,8 @@ type LoginRequest struct {
 
 // LoginResponse 登录响应
 type LoginResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
+	AccessToken  string         `json:"access_token"`
+	RefreshToken string         `json:"refresh_token"`
 	User         *LoginUserInfo `json:"user"`
 }
 
@@ -109,7 +131,7 @@ func (h *Handler) login(c *gin.Context) {
 	}
 
 	if err := h.validator.Struct(req); err != nil {
-		response.Error(c, response.ErrInvalidRequest(err.Error()))
+		response.Error(c, h.validator.InvalidRequest(c, err))
 		return
 	}
 
@@ -161,7 +183,7 @@ func (h *Handler) createUser(c *gin.Context) {
 	}
 
 	if err := h.validator.Struct(req); err != nil {
-		response.Error(c, response.ErrInvalidRequest(err.Error()))
+		response.Error(c, h.validator.InvalidRequest(c, err))
 		return
 	}
 
@@ -228,7 +250,7 @@ func (h *Handler) createCourse(c *gin.Context) {
 	}
 
 	if err := h.validator.Struct(req); err != nil {
-		response.Error(c, response.ErrInvalidRequest(err.Error()))
+		response.Error(c, h.validator.InvalidRequest(c, err))
 		return
 	}
 

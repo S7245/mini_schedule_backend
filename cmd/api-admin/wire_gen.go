@@ -9,8 +9,8 @@ package main
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
-	swaggerFiles "github.com/swaggo/files"
-	ginSwagger "github.com/swaggo/gin-swagger"
+	"github.com/swaggo/files"
+	"github.com/swaggo/gin-swagger"
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
 	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
@@ -22,6 +22,10 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 	"gorm.io/gorm"
 	"log/slog"
+)
+
+import (
+	_ "github.com/zkw/mini-schedule/backend/docs/admin"
 )
 
 // Injectors from wire.go:
@@ -36,18 +40,17 @@ func initializeAdminApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	repository := persistence.NewBrandRepository(db)
 	service := brand.NewService(repository, cfg)
 	commercialRepository := persistence.NewCommercialRepository(db)
-	adminUserRepository := persistence.NewAdminUserRepository(db)
-	jwtConfig := provideJWTConfig(cfg)
-	cacheService := cache.NewService(jwtConfig)
-	adminUserService := user.NewAdminUserService(adminUserRepository, cacheService, log, cfg)
 	redisConfig := provideRedisConfig(cfg)
 	client, err := cache.NewRedisClient(redisConfig, log)
 	if err != nil {
 		return nil, nil, err
 	}
-	// TODO wire regen: 微信支付 adapter 已加入 commercial.Service，请运行 `go generate ./...`
-	wechatAdapter := payment.NewWeChatPaymentAdapter(cfg)
-	commercialService := commercial.NewService(commercialRepository, cfg, client, wechatAdapter)
+	weChatPaymentAdapter := payment.NewWeChatPaymentAdapter(cfg)
+	commercialService := commercial.NewService(commercialRepository, cfg, client, weChatPaymentAdapter)
+	adminUserRepository := persistence.NewAdminUserRepository(db)
+	jwtConfig := provideJWTConfig(cfg)
+	cacheService := cache.NewService(jwtConfig)
+	adminUserService := user.NewAdminUserService(adminUserRepository, cacheService, log, cfg)
 	handler := admin.NewHandler(service, commercialService, adminUserService, cacheService)
 	engine := newAdminRouter(handler, db, client, cacheService, cfg, log)
 	return engine, func() {
@@ -86,7 +89,6 @@ func newAdminRouter(
 	r.Use(middleware.Locale())
 	r.Use(gin.Recovery())
 
-	// Swagger UI（仅 debug 模式）
 	if cfg.App.Debug {
 		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	}
