@@ -116,6 +116,33 @@ type PaymentTransactionModel struct {
 
 func (PaymentTransactionModel) TableName() string { return "payment_transactions" }
 
+// BeforeCreate 兜底所有 JSONB 列，防止 nil 切片 → SQL NULL → 23502。
+// payment_transactions 的 request/response/callback_payload 在迁移里允许 NULL，
+// 当前未触发问题，但保留 hook 与 BatchX 习惯一致，避免后续加 NOT NULL 时漏改。
+func (m *PaymentTransactionModel) BeforeCreate(*gorm.DB) error {
+	if len(m.RequestPayload) == 0 {
+		m.RequestPayload = []byte("{}")
+	}
+	if len(m.ResponsePayload) == 0 {
+		m.ResponsePayload = []byte("{}")
+	}
+	if len(m.CallbackPayload) == 0 {
+		m.CallbackPayload = []byte("{}")
+	}
+	return nil
+}
+
+// BeforeCreate 兜底 saas_plan_orders 的 JSONB 列。当前列允许 NULL，但与 PaymentTransaction 保持一致策略。
+func (m *SaaSPlanOrderModel) BeforeCreate(*gorm.DB) error {
+	if len(m.PaymentRequestPayload) == 0 {
+		m.PaymentRequestPayload = []byte("{}")
+	}
+	if len(m.PaymentResponsePayload) == 0 {
+		m.PaymentResponsePayload = []byte("{}")
+	}
+	return nil
+}
+
 type PaymentCallbackLogModel struct {
 	ID                int64      `gorm:"primaryKey;autoIncrement" json:"id"`
 	CreatedAt         time.Time  `json:"created_at"`
@@ -160,3 +187,12 @@ type OperationLogModel struct {
 }
 
 func (OperationLogModel) TableName() string { return "operation_logs" }
+
+// BeforeCreate 兜底 operation_logs.metadata JSONB NOT NULL 列。
+// 当前所有调用点都显式赋值，但补 hook 防止后续遗漏 → 23502。
+func (m *OperationLogModel) BeforeCreate(*gorm.DB) error {
+	if len(m.Metadata) == 0 {
+		m.Metadata = []byte("{}")
+	}
+	return nil
+}

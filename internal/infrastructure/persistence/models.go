@@ -17,11 +17,17 @@ type BaseModel struct {
 // BrandModel 品牌 GORM 模型
 type BrandModel struct {
 	BaseModel
-	Name         string `gorm:"size:100;not null;index" json:"name"`
-	LogoURL      string `gorm:"size:500" json:"logo_url"`
-	ContactName  string `gorm:"size:50;not null" json:"contact_name"`
-	ContactPhone string `gorm:"size:20;not null;uniqueIndex" json:"contact_phone"`
-	Status       string `gorm:"size:20;not null;default:pending;index" json:"status"`
+	Name                  string     `gorm:"size:100;not null;index" json:"name"`
+	LogoURL               string     `gorm:"size:500" json:"logo_url"`
+	ContactName           string     `gorm:"size:50;not null" json:"contact_name"`
+	ContactPhone          string     `gorm:"size:20;not null;uniqueIndex" json:"contact_phone"`
+	ContactEmail          string     `gorm:"size:100" json:"contact_email"`
+	BrandCode             string     `gorm:"size:50" json:"brand_code"`
+	IndustryType          string     `gorm:"size:50" json:"industry_type"`
+	Description           string     `gorm:"size:2000" json:"description"`
+	OnboardingStatus      string     `gorm:"size:30;not null;default:not_started" json:"onboarding_status"`
+	OnboardingCompletedAt *time.Time `json:"onboarding_completed_at"`
+	Status                string     `gorm:"size:20;not null;default:pending;index" json:"status"`
 }
 
 func (BrandModel) TableName() string { return "brands" }
