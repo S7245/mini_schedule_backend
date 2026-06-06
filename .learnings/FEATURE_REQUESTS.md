@@ -24,4 +24,4 @@
 
 ## 2026-06-06 Batch 4 → Batch 5 起飞前必做
 
-- **migration 自动化 / schema drift 防御**（来自 ERRORS.md 同日条目）：Batch 4 的 000004 在本地从未应用且 unit test 未发现，到 Batch 5 staff/course CRUD 时 schema 变更只会更频繁。下一批起跑前**必须**二选一落地：(a) `api-*` boot 时调 `golang-migrate.Up()` 自动应用（生产用环境变量开关），失败则 `log.Fatal`；或 (b) CI 步骤 `migrate up && go test ./...` 用真实 PG 跑而非 sqlmock。当前 Makefile 硬编码 `postgres://postgres:postgres@...` 也需要顺手改为读 `DATABASE_URL` / `${PG_USER:-$USER}`。
+- ~~**migration 自动化 / schema drift 防御**~~：✅ Batch 4.5 已落地（commit `13bdcd2..696d02d`）。auto-apply on boot + Makefile DSN fallback 都已上线。CI 真 PG 跑测试仍未做，但 boot-time 已足够覆盖本地开发主线场景。

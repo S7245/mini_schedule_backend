@@ -38,3 +38,11 @@
 - **`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 是开发期增量列的安全姿势**。`migrations/000004_brand_profile_extras.up.sql` 用 `IF NOT EXISTS` 防止本地反复跑 up/down 时的 "column already exists" 中断。**但**该 migration 在开发机上从未应用——下一批 Staff/Course 之前需要先解决 Makefile 中写死的 `postgres://postgres:postgres@...` 凭据问题（见 ERRORS.md 同日条目）。
 - **code-review 双轨：阻塞修复立即提交 + 非阻塞挂 FEATURE_REQUESTS**。Batch 4 的 7 项 review 修复（onboarding 原子事务、quota expires_at、completed 持久化、status 过滤、skip 清 completed_at、AppError.Details、skipStep 不吞 bind 错）全部当批次合入；同时 11 项偏架构/性能/枚举的发现转入 `FEATURE_REQUESTS.md:9-23`。**约定**：post-impl review 输出必须二分——"现在合"对应 commit `fix(batch-N):`；"留到下一批"对应 FR 条目并标明 review 编号或场景，避免堆在脑里下批漂移。
 - **白名单 PATCH 的字段隔离应在 handler binding 层就闭环**。`profile_handler.go:38-44` 的 `patchProfileBody` 只声明 5 个白名单字段（不含 `name`/`contact_phone`/`contact_name`），即便客户端发了也被 Gin 直接丢弃；service 层无需再做防御性删除。后续 Staff / Learner 的 PATCH 一律遵循"binding struct 即白名单契约"，不要在 service 里二次过滤——容易和 binding 漂移。
+
+## 2026-06-06 Batch 4.5 patterns
+
+- **`//go:embed *.sql` 路径在 iofs 中要传 "."，不要传 "migrations"**。当 embed 指令在 `migrations` 包内（`//go:embed *.sql`），文件挂在 embed.FS 的**根**，不是 `migrations/` 子目录。`iofs.New(fs, "migrations")` 会找不到文件并报 `open migrations: file does not exist`。正确写法：`iofs.New(fs, ".")`（见 `internal/infrastructure/database/migrate.go:35`）。
+- **boot-time migration 必须在 Wire 之前调**。Wire 已经会 `gorm.Open`；如果先 Wire 后 migrate，模型 AutoMigrate 路径可能撞 schema drift。模式：`config.Load → 应用 migration → Wire init → 启 server`，三个 cmd main.go 都这么排。
+- **dirty 状态默认拒启动**。`schema_migrations.dirty=true` 意味着上一次 migration 在中途崩了，schema 可能损坏。`RunMigrationsUp` 提前 `m.Version()` 检测 dirty 后返 error → main.go `log.Fatal`。比"warn 后继续"更安全，应用层不可能可靠判断 schema 完整性。
+- **多 cmd 同时启动靠 PG advisory lock 互斥**。golang-migrate 内置 advisory lock；多个 cmd 并发启动时只有一个真跑 up，其余看到锁释放后 version 已就绪 → `migrate.ErrNoChange` → log "schema up to date"。不需要在应用层加任何协调机制。
+- **生产 env 显式开启 + dev yaml 默认开启 的对称写法**。dev yaml 默认 `auto_migrate_on_boot: true`，生产 yaml 默认 `false`，靠 `MINI_SCHEDULE_DATABASE_AUTO_MIGRATE_ON_BOOT=true` 显式开。这是 Railway / K8s 类多 pod 部署的标准做法——避免水平扩展时新 pod 误跑 migration、避免热升级中的脏读窗口。
