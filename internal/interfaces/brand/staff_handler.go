@@ -3,6 +3,7 @@ package brand
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -274,18 +275,64 @@ func (h *StaffHandler) getInstructor(c *gin.Context) {
 		response.Error(c, err)
 		return
 	}
-	response.Success(c, p)
+	response.Success(c, toInstructorResponse(p))
 }
 
 type upsertInstructorBody struct {
-	DisplayName         string `json:"display_name"`
-	AvatarURL           string `json:"avatar_url"`
-	Bio                 string `json:"bio"`
-	Specialties         string `json:"specialties"`
-	Certificates        string `json:"certificates"`
-	IsVisibleToLearners bool   `json:"is_visible_to_learners"`
-	IsSchedulable       bool   `json:"is_schedulable"`
-	Status              string `json:"status"`
+	DisplayName string `json:"display_name"`
+	AvatarURL   string `json:"avatar_url"`
+	Bio         string `json:"bio"`
+	// 接受数组 string[]（前端 chip / 输入控件惯例），handler 内部 join 成 csv 给 service / DB。
+	Specialties         []string `json:"specialties"`
+	Certificates        []string `json:"certificates"`
+	IsVisibleToLearners bool     `json:"is_visible_to_learners"`
+	IsSchedulable       bool     `json:"is_schedulable"`
+	Status              string   `json:"status"`
+}
+
+// instructorProfileResponse 把 domain 的 csv 字符串 split 回数组，与前端 string[] 类型对齐。
+type instructorProfileResponse struct {
+	*instructor.Profile
+	Specialties  []string `json:"specialties"`
+	Certificates []string `json:"certificates"`
+}
+
+func toInstructorResponse(p *instructor.Profile) *instructorProfileResponse {
+	if p == nil {
+		return nil
+	}
+	return &instructorProfileResponse{
+		Profile:      p,
+		Specialties:  splitCSV(p.Specialties),
+		Certificates: splitCSV(p.Certificates),
+	}
+}
+
+// joinCSV 把 []string 合成逗号分隔字符串（trim + 跳过空项），存 DB 用。
+func joinCSV(items []string) string {
+	out := make([]string, 0, len(items))
+	for _, s := range items {
+		if t := strings.TrimSpace(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+// splitCSV 反向操作，DB csv → []string（空字符串返 []）。
+func splitCSV(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return []string{}
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (h *StaffHandler) upsertInstructor(c *gin.Context) {
@@ -305,8 +352,8 @@ func (h *StaffHandler) upsertInstructor(c *gin.Context) {
 		DisplayName:         body.DisplayName,
 		AvatarURL:           body.AvatarURL,
 		Bio:                 body.Bio,
-		Specialties:         body.Specialties,
-		Certificates:        body.Certificates,
+		Specialties:         joinCSV(body.Specialties),
+		Certificates:        joinCSV(body.Certificates),
 		IsVisibleToLearners: body.IsVisibleToLearners,
 		IsSchedulable:       body.IsSchedulable,
 		Status:              instructor.Status(body.Status),
@@ -315,7 +362,7 @@ func (h *StaffHandler) upsertInstructor(c *gin.Context) {
 		response.Error(c, err)
 		return
 	}
-	response.Success(c, prof)
+	response.Success(c, toInstructorResponse(prof))
 }
 
 func (h *StaffHandler) deleteInstructor(c *gin.Context) {
