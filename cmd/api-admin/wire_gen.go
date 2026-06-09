@@ -13,6 +13,7 @@ import (
 	"github.com/swaggo/gin-swagger"
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
 	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
+	"github.com/zkw/mini-schedule/backend/internal/application/staff"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
@@ -51,7 +52,10 @@ func initializeAdminApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	jwtConfig := provideJWTConfig(cfg)
 	cacheService := cache.NewService(jwtConfig)
 	adminUserService := user.NewAdminUserService(adminUserRepository, cacheService, log, cfg)
-	handler := admin.NewHandler(service, commercialService, adminUserService, cacheService)
+	roleRepository := persistence.NewRoleRepository(db)
+	roleAllocator := staff.NewRoleAllocator(roleRepository, db)
+	systemHandler := admin.NewSystemHandler(roleAllocator)
+	handler := admin.NewHandler(service, commercialService, adminUserService, cacheService, systemHandler)
 	engine := newAdminRouter(handler, db, client, cacheService, cfg, log)
 	return engine, func() {
 	}, nil

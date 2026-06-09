@@ -24,14 +24,21 @@ type Handler struct {
 	adminUserSvc  *user.AdminUserService
 	jwtSvc        *cache.Service
 	validator     *validation.Validator
+
+	// Batch 5
+	system *SystemHandler
 }
 
-// NewHandler 创建管理端 Handler
+// NewHandler 创建管理端 Handler.
+//
+// system 可为 nil；brand 进程（providePublicHandler）只用 RegisterPublicRoutes，
+// 不需要 system endpoint，故注入 nil。
 func NewHandler(
 	brandSvc *brand.Service,
 	commercialSvc *commercialapp.Service,
 	adminUserSvc *user.AdminUserService,
 	jwtSvc *cache.Service,
+	system *SystemHandler,
 ) *Handler {
 	return &Handler{
 		brandSvc:      brandSvc,
@@ -39,6 +46,7 @@ func NewHandler(
 		adminUserSvc:  adminUserSvc,
 		jwtSvc:        jwtSvc,
 		validator:     validation.New(),
+		system:        system,
 	}
 }
 
@@ -155,6 +163,9 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		auth.GET("/admins", h.listAdmins)
 
 		h.registerCommercialRoutes(auth)
+		if h.system != nil {
+			h.system.RegisterRoutes(auth)
+		}
 	}
 }
 

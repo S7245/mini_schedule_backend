@@ -17,6 +17,7 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
 	appLocation "github.com/zkw/mini-schedule/backend/internal/application/location"
 	appOnboarding "github.com/zkw/mini-schedule/backend/internal/application/onboarding"
+	appStaff "github.com/zkw/mini-schedule/backend/internal/application/staff"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
@@ -35,7 +36,7 @@ import (
 // 依赖（之前 wire_gen 把它们注入了 nil）。本 provider 集中容纳这层适配，方便后续重构成
 // 独立 PublicHandler。
 func providePublicHandler(commercialSvc *commercialapp.Service) *adminHandler.Handler {
-	return adminHandler.NewHandler(nil, commercialSvc, nil, nil)
+	return adminHandler.NewHandler(nil, commercialSvc, nil, nil, nil)
 }
 
 // Provider 函数：从 Config 提取子配置
@@ -75,6 +76,9 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewOnboardingRepository,
 		persistence.NewLocationRepository,
 		persistence.NewBrandProfileRepository,
+		persistence.NewStaffRepository,
+		persistence.NewRoleRepository,
+		persistence.NewInstructorRepository,
 
 		// 应用服务
 		brand.NewService,
@@ -87,12 +91,15 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		appOnboarding.NewService,
 		appLocation.NewService,
 		brandprofile.NewService,
+		appStaff.NewService,
+		appStaff.NewRoleAllocator,
 
 		// Handler
 		brandHandler.NewHandler,
 		brandHandler.NewOnboardingHandler,
 		brandHandler.NewProfileHandler,
 		brandHandler.NewLocationHandler,
+		brandHandler.NewStaffHandler,
 		providePublicHandler,
 
 		// 路由
@@ -103,12 +110,21 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 func newBrandRouter(
 	h *brandHandler.Handler,
 	ph *adminHandler.Handler,
+	commercialSvc *commercialapp.Service,
+	roleAllocator *appStaff.RoleAllocator,
 	db *gorm.DB,
 	redisClient *redis.Client,
 	jwtSvc *cache.Service,
 	cfg *config.Config,
 	log *slog.Logger,
 ) *gin.Engine {
+	// Batch 5: 把 RoleAllocator 注入 commercial.Service，让公开注册流程
+	// 在 brand_user INSERT 同事务里自动分配 brand_owner 角色。
+	// 测试场景里可能两者均为 nil（router_test 仅校验 CORS），跳过。
+	if commercialSvc != nil && roleAllocator != nil {
+		commercialSvc.SetOwnerRoleAllocator(roleAllocator)
+	}
+
 	gin.SetMode(gin.ReleaseMode)
 	if cfg.App.Debug {
 		gin.SetMode(gin.DebugMode)

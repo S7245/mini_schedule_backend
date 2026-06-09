@@ -33,6 +33,9 @@ type Handler struct {
 	onboarding *OnboardingHandler
 	profile    *ProfileHandler
 	location   *LocationHandler
+
+	// Batch 5
+	staff *StaffHandler
 }
 
 // NewHandler 创建品牌 Handler
@@ -46,6 +49,7 @@ func NewHandler(
 	onboarding *OnboardingHandler,
 	profile *ProfileHandler,
 	location *LocationHandler,
+	staff *StaffHandler,
 ) *Handler {
 	return &Handler{
 		brandSvc:     brandSvc,
@@ -58,6 +62,7 @@ func NewHandler(
 		onboarding:   onboarding,
 		profile:      profile,
 		location:     location,
+		staff:        staff,
 	}
 }
 
@@ -73,7 +78,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	auth := r.Group("")
 	auth.Use(middleware.JWTAuth(h.jwtSvc, "brand"))
 	{
-		// 用户管理
+		// Deprecated: 用户管理（Batch 1 入口，Batch 5+ 请使用 /staff）。
 		auth.POST("/users", h.createUser)
 		auth.GET("/users", h.listUsers)
 		auth.GET("/users/:id", h.getUser)
@@ -98,6 +103,9 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		}
 		if h.location != nil {
 			h.location.RegisterRoutes(auth)
+		}
+		if h.staff != nil {
+			h.staff.RegisterRoutes(auth)
 		}
 	}
 }

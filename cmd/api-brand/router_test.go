@@ -18,7 +18,9 @@ func TestBrandRouterAllowsConfiguredPreflightOrigin(t *testing.T) {
 		},
 	}
 	router := newBrandRouter(
-		brandHandler.NewHandler(nil, nil, nil, nil, nil, nil, nil, nil, nil),
+		brandHandler.NewHandler(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil),
+		nil,
+		nil,
 		nil,
 		nil,
 		nil,

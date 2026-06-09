@@ -15,6 +15,7 @@ import (
 
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
 	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
+	appStaff "github.com/zkw/mini-schedule/backend/internal/application/staff"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
@@ -51,12 +52,15 @@ func initializeAdminApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewBrandRepository,
 		persistence.NewCommercialRepository,
 		persistence.NewAdminUserRepository,
+		persistence.NewRoleRepository,
 
 		brand.NewService,
 		commercial.NewService,
 		user.NewAdminUserService,
+		appStaff.NewRoleAllocator,
 
 		adminHandler.NewHandler,
+		adminHandler.NewSystemHandler,
 
 		newAdminRouter,
 	))

@@ -15,6 +15,7 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
 	"github.com/zkw/mini-schedule/backend/internal/application/location"
 	"github.com/zkw/mini-schedule/backend/internal/application/onboarding"
+	"github.com/zkw/mini-schedule/backend/internal/application/staff"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
@@ -63,7 +64,12 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	locationRepository := persistence.NewLocationRepository(db, subscriptionGuard)
 	locationService := location.NewService(locationRepository)
 	locationHandler := brand2.NewLocationHandler(locationService)
-	handler := brand2.NewHandler(service, brandUserService, appUserService, courseService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler)
+	staffRepository := persistence.NewStaffRepository(db, subscriptionGuard)
+	roleRepository := persistence.NewRoleRepository(db)
+	instructorRepository := persistence.NewInstructorRepository(db)
+	staffService := staff.NewService(staffRepository, roleRepository, instructorRepository)
+	staffHandler := brand2.NewStaffHandler(staffService)
+	handler := brand2.NewHandler(service, brandUserService, appUserService, courseService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler, staffHandler)
 	commercialRepository := persistence.NewCommercialRepository(db)
 	redisConfig := provideRedisConfig(cfg)
 	client, err := cache.NewRedisClient(redisConfig, log)
@@ -73,7 +79,8 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	weChatPaymentAdapter := payment.NewWeChatPaymentAdapter(cfg)
 	commercialService := commercial.NewService(commercialRepository, cfg, client, weChatPaymentAdapter)
 	adminHandler := providePublicHandler(commercialService)
-	engine := newBrandRouter(handler, adminHandler, db, client, cacheService, cfg, log)
+	roleAllocator := staff.NewRoleAllocator(roleRepository, db)
+	engine := newBrandRouter(handler, adminHandler, commercialService, roleAllocator, db, client, cacheService, cfg, log)
 	return engine, func() {
 	}, nil
 }
@@ -87,7 +94,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 // 依赖（之前 wire_gen 把它们注入了 nil）。本 provider 集中容纳这层适配，方便后续重构成
 // 独立 PublicHandler。
 func providePublicHandler(commercialSvc *commercial.Service) *admin.Handler {
-	return admin.NewHandler(nil, commercialSvc, nil, nil)
+	return admin.NewHandler(nil, commercialSvc, nil, nil, nil)
 }
 
 // Provider 函数：从 Config 提取子配置
@@ -106,12 +113,18 @@ func provideJWTConfig(cfg *config.Config) *config.JWTConfig {
 func newBrandRouter(
 	h *brand2.Handler,
 	ph *admin.Handler,
+	commercialSvc *commercial.Service,
+	roleAllocator *staff.RoleAllocator,
 	db *gorm.DB,
 	redisClient *redis.Client,
 	jwtSvc *cache.Service,
 	cfg *config.Config,
 	log *slog.Logger,
 ) *gin.Engine {
+
+	if commercialSvc != nil && roleAllocator != nil {
+		commercialSvc.SetOwnerRoleAllocator(roleAllocator)
+	}
 	gin.SetMode(gin.ReleaseMode)
 	if cfg.App.Debug {
 		gin.SetMode(gin.DebugMode)
