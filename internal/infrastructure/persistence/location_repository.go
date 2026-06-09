@@ -2,25 +2,28 @@ package persistence
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
-	"time"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 
+	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
+	"github.com/zkw/mini-schedule/backend/internal/audit"
 	"github.com/zkw/mini-schedule/backend/internal/domain/location"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
 
 type locationRepository struct {
-	db *gorm.DB
+	db    *gorm.DB
+	guard *commercial.SubscriptionGuard
 }
 
 // NewLocationRepository 创建 Location 仓储。
-func NewLocationRepository(db *gorm.DB) location.Repository {
-	return &locationRepository{db: db}
+//
+// guard 抽到 application/commercial 后注入；Create 时复用三段式
+// "锁 active subscription → COUNT → 比 max"（见 SubscriptionGuard.CheckAndCount）。
+func NewLocationRepository(db *gorm.DB, guard *commercial.SubscriptionGuard) location.Repository {
+	return &locationRepository{db: db, guard: guard}
 }
 
 // Create 在单一事务内做 quota 校验 + INSERT：
@@ -35,40 +38,14 @@ func (r *locationRepository) Create(ctx context.Context, input location.CreateLo
 	var created LocationModel
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 1) 锁 brand 的 active 且未过期 subscription（review #2）：
-		//    单看 status='active' 不够——expires_at 已过但 cron 没翻状态时仍会被命中。
-		//    实际有效窗口：grace_ends_at 存在则用 grace_ends_at；否则用 expires_at。
-		now := time.Now().UTC()
-		var sub BrandSubscriptionModel
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("brand_id = ? AND status = ? AND (grace_ends_at > ? OR (grace_ends_at IS NULL AND expires_at > ?))",
-				input.BrandID, "active", now, now).
-			Order("id DESC").
-			First(&sub).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return apperr.NewAppError(apperr.ErrSubscriptionRestricted, "未找到有效订阅", 403)
-			}
-			return apperr.ErrInternalF("查询订阅失败", err)
+		// 1) SubscriptionGuard 一次性做：SELECT FOR UPDATE active 且未过期 subscription
+		//    + COUNT locations（排除软删，含 inactive 防 disable→腾位 hack）+ 比 max。
+		//    成功返回 (current, max) 供后续日志；超限返 QUOTA_EXCEEDED + Details。
+		if _, _, err := r.guard.CheckAndCount(ctx, tx, input.BrandID, commercial.ResourceLocation); err != nil {
+			return err
 		}
 
-		// 2) COUNT active+inactive locations (排除软删)
-		var current int64
-		if err := tx.Model(&LocationModel{}).
-			Where("brand_id = ? AND deleted_at IS NULL", input.BrandID).
-			Count(&current).Error; err != nil {
-			return apperr.ErrInternalF("统计门店数量失败", err)
-		}
-
-		if current >= int64(sub.MaxLocations) {
-			// review #6：current/max 走 AppError.Details，由 response.Error 统一序列化。
-			return apperr.NewAppError(apperr.ErrQuotaExceeded, "门店数量已达套餐上限", 409).
-				WithDetails(map[string]any{
-					"current": current,
-					"max":     int64(sub.MaxLocations),
-				})
-		}
-
-		// 3) INSERT
+		// 2) INSERT
 		created = LocationModel{
 			BrandID: input.BrandID,
 			Name:    strings.TrimSpace(input.Name),
@@ -84,7 +61,7 @@ func (r *locationRepository) Create(ctx context.Context, input location.CreateLo
 			return apperr.ErrInternalF("创建门店失败", err)
 		}
 
-		// 4) OperationLog 留痕（同事务内）
+		// 3) OperationLog 留痕（同事务内）
 		return writeLocationOperationLog(tx, input.BrandID, input.ActorID, "location_created", created.ID, nil, &created)
 	})
 	if err != nil {
@@ -232,30 +209,17 @@ func (r *locationRepository) SoftDelete(ctx context.Context, brandID, actorID, i
 }
 
 // writeLocationOperationLog 在事务内写一条门店生命周期 OperationLog。
-// actor_type 固定为 brand_user；actorID 为 0 时存为 NULL（兼容旧调用 / 系统操作）。
+// 经 Batch 5 T02 后所有写入都走 audit.Write；actor_type 固定为 brand_user。
 func writeLocationOperationLog(tx *gorm.DB, brandID, actorID int64, action string, locationID int64, before, after *LocationModel) error {
-	metadata, err := json.Marshal(map[string]interface{}{
-		"before": before,
-		"after":  after,
-	})
-	if err != nil {
-		return apperr.ErrInternalF("序列化操作日志失败", err)
-	}
-	var actorIDPtr *int64
-	if actorID > 0 {
-		actorIDPtr = &actorID
-	}
 	bID := brandID
-	tID := locationID
-	return tx.Create(&OperationLogModel{
-		BrandID:    &bID,
-		ActorType:  "brand_user",
-		ActorID:    actorIDPtr,
-		Action:     action,
-		TargetType: "location",
-		TargetID:   &tID,
-		Metadata:   metadata,
-	}).Error
+	return audit.Write(tx, audit.Event{
+		BrandID: &bID,
+		Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: actorID},
+		Action:  action,
+		Target:  audit.Target{Type: "location", ID: locationID},
+		Before:  before,
+		After:   after,
+	})
 }
 
 func toLocationDomain(m *LocationModel) *location.Location {

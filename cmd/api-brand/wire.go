@@ -83,6 +83,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		course.NewService,
 		training.NewService,
 		commercialapp.NewService,
+		commercialapp.NewSubscriptionGuard,
 		appOnboarding.NewService,
 		appLocation.NewService,
 		brandprofile.NewService,

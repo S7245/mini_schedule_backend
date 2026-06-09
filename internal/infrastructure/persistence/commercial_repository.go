@@ -2,12 +2,12 @@ package persistence
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/zkw/mini-schedule/backend/internal/audit"
 	"github.com/zkw/mini-schedule/backend/internal/domain/commercial"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 	"gorm.io/gorm"
@@ -834,26 +834,18 @@ type operationLogInput struct {
 	After      interface{}
 }
 
+// createOperationLog 是历史 platform_admin actor 入口，已切换为统一 audit.Write。
+// 行为兼容：actor_type=platform_admin。新代码请直接调 audit.Write。
 func createOperationLog(tx *gorm.DB, input operationLogInput) error {
-	metadata, err := json.Marshal(map[string]interface{}{
-		"before": input.Before,
-		"after":  input.After,
+	return audit.Write(tx, audit.Event{
+		BrandID: input.BrandID,
+		Actor:   audit.Actor{Type: audit.ActorPlatformAdmin, ID: input.ActorID},
+		Action:  input.Action,
+		Target:  audit.Target{Type: input.TargetType, ID: input.TargetID},
+		Reason:  input.Reason,
+		Before:  input.Before,
+		After:   input.After,
 	})
-	if err != nil {
-		return err
-	}
-	actorID := input.ActorID
-	targetID := input.TargetID
-	return tx.Create(&OperationLogModel{
-		BrandID:    input.BrandID,
-		ActorType:  "platform_admin",
-		ActorID:    &actorID,
-		Action:     input.Action,
-		TargetType: input.TargetType,
-		TargetID:   &targetID,
-		Reason:     input.Reason,
-		Metadata:   metadata,
-	}).Error
 }
 
 func mapBrandSubscriptionError(message string, err error) error {
@@ -1037,25 +1029,22 @@ func (r *commercialRepository) ProcessWeChatCallback(ctx context.Context, input 
 			if err := tx.Create(&logModel).Error; err != nil {
 				return apperr.ErrInternalF("写入回调日志失败", err)
 			}
-			// OperationLog: payment_amount_mismatch
-			meta, _ := json.Marshal(map[string]interface{}{
-				"expected_amount_fen": orderAmountFen,
-				"expected_currency":   expectedCurrency,
-				"actual_amount_fen":   input.Amount,
-				"actual_currency":     actualCurrency,
-				"out_trade_no":        order.OutTradeNo,
-				"third_party_trade_no": input.ThirdPartyTradeNo,
-			})
-			targetID := order.ID
-			if err := tx.Create(&OperationLogModel{
-				BrandID:    &order.BrandID,
-				ActorType:  "system",
-				Action:     "payment_amount_mismatch",
-				TargetType: "saas_plan_order",
-				TargetID:   &targetID,
-				Reason:     errMsg,
-				Metadata:   meta,
-			}).Error; err != nil {
+			// OperationLog: payment_amount_mismatch（通过 audit pkg）
+			if err := audit.Write(tx, audit.Event{
+				BrandID: &order.BrandID,
+				Actor:   audit.Actor{Type: audit.ActorSystem},
+				Action:  "payment_amount_mismatch",
+				Target:  audit.Target{Type: "saas_plan_order", ID: order.ID},
+				Reason:  errMsg,
+				After: map[string]interface{}{
+					"expected_amount_fen":  orderAmountFen,
+					"expected_currency":    expectedCurrency,
+					"actual_amount_fen":    input.Amount,
+					"actual_currency":      actualCurrency,
+					"out_trade_no":         order.OutTradeNo,
+					"third_party_trade_no": input.ThirdPartyTradeNo,
+				},
+			}); err != nil {
 				return apperr.ErrInternalF("写入操作日志失败", err)
 			}
 			result.Success = false
@@ -1174,24 +1163,21 @@ func (r *commercialRepository) ProcessWeChatCallback(ctx context.Context, input 
 			return apperr.ErrInternalF("更新回调日志失败", err)
 		}
 
-		// 6.8 写 OperationLog
-		meta, _ := json.Marshal(map[string]interface{}{
-			"order_id":             order.ID,
-			"transaction_id":       txModel.ID,
-			"subscription_id":      subModel.ID,
-			"amount_fen":           input.Amount,
-			"currency":             actualCurrency,
-			"third_party_trade_no": input.ThirdPartyTradeNo,
-		})
-		targetID := order.ID
-		if err := tx.Create(&OperationLogModel{
-			BrandID:    &order.BrandID,
-			ActorType:  "system",
-			Action:     "payment_callback_success",
-			TargetType: "saas_plan_order",
-			TargetID:   &targetID,
-			Metadata:   meta,
-		}).Error; err != nil {
+		// 6.8 写 OperationLog（通过 audit pkg）
+		if err := audit.Write(tx, audit.Event{
+			BrandID: &order.BrandID,
+			Actor:   audit.Actor{Type: audit.ActorSystem},
+			Action:  "payment_callback_success",
+			Target:  audit.Target{Type: "saas_plan_order", ID: order.ID},
+			After: map[string]interface{}{
+				"order_id":             order.ID,
+				"transaction_id":       txModel.ID,
+				"subscription_id":      subModel.ID,
+				"amount_fen":           input.Amount,
+				"currency":             actualCurrency,
+				"third_party_trade_no": input.ThirdPartyTradeNo,
+			},
+		}); err != nil {
 			return apperr.ErrInternalF("写入操作日志失败", err)
 		}
 
