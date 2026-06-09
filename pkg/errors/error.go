@@ -56,6 +56,14 @@ const (
 	ErrLocationNotFound       ErrorCode = "LOCATION_NOT_FOUND"
 	ErrQuotaExceeded          ErrorCode = "QUOTA_EXCEEDED"
 	ErrSubscriptionRestricted ErrorCode = "SUBSCRIPTION_RESTRICTED"
+
+	// Batch 5 — Staff / Role / Instructor
+	ErrStaffPhoneDuplicated      ErrorCode = "STAFF_PHONE_DUPLICATED"
+	ErrStaffNotFound             ErrorCode = "STAFF_NOT_FOUND"
+	ErrOwnerProtected            ErrorCode = "OWNER_PROTECTED"
+	ErrRoleNotFound              ErrorCode = "ROLE_NOT_FOUND"
+	ErrLocationAssignmentInvalid ErrorCode = "LOCATION_ASSIGNMENT_INVALID"
+	ErrInstructorProfileNotFound ErrorCode = "INSTRUCTOR_PROFILE_NOT_FOUND"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码
