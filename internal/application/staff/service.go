@@ -1,0 +1,408 @@
+// Package staff 应用层。
+//
+// 编排：参数校验 + Subscription quota（通过 SubscriptionGuard）+
+// Owner 保护 + 角色 / Location 任职管理 + 教练档案 1:1 upsert。
+package staff
+
+import (
+	"context"
+	"regexp"
+	"strings"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/zkw/mini-schedule/backend/internal/domain/instructor"
+	"github.com/zkw/mini-schedule/backend/internal/domain/role"
+	"github.com/zkw/mini-schedule/backend/internal/domain/staff"
+	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
+)
+
+// Service 编排 staff CRUD + 角色 / 任职 / 教练。
+//
+// 注：subscription quota 校验下沉到 staff_repository.Create 的事务内，
+// 复用 location_repository 同款 SubscriptionGuard 模板。
+type Service struct {
+	repo           staff.Repository
+	roleRepo       role.Repository
+	instructorRepo instructor.Repository
+}
+
+// NewService 构造函数（Wire 会注入）。
+func NewService(
+	repo staff.Repository,
+	roleRepo role.Repository,
+	instructorRepo instructor.Repository,
+) *Service {
+	return &Service{
+		repo:           repo,
+		roleRepo:       roleRepo,
+		instructorRepo: instructorRepo,
+	}
+}
+
+// Public input types（handler 直接构造，不经 domain）。
+
+type CreateInput struct {
+	BrandID             int64
+	ActorID             int64
+	Phone               string
+	Name                string
+	InitialPassword     string
+	RoleCodes           []string
+	LocationAssignments []staff.LocationAssignmentInput
+}
+
+type UpdateInput = staff.UpdateInput
+
+type ListInput struct {
+	BrandID       int64
+	Status        string
+	HasInstructor *bool
+	Search        string
+	Page          int
+	PageSize      int
+}
+
+var (
+	phoneRegex    = regexp.MustCompile(`^\+?\d{6,20}$`)
+	passwordLen   = 8
+	passwordRules = regexp.MustCompile(`^[A-Za-z\d!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?~]{8,64}$`)
+)
+
+func (s *Service) Create(ctx context.Context, in CreateInput) (*staff.Staff, error) {
+	if in.BrandID <= 0 {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "品牌 ID 无效", 400)
+	}
+	if !phoneRegex.MatchString(strings.TrimSpace(in.Phone)) {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "手机号格式不合法", 400)
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "姓名不能为空", 400)
+	}
+	if len([]rune(in.Name)) > 50 {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "姓名过长", 400)
+	}
+	if err := validatePassword(in.InitialPassword); err != nil {
+		return nil, err
+	}
+
+	// 1) 校验 location_assignments 不重复 + 最多一个 primary
+	if err := validateLocationAssignments(in.LocationAssignments); err != nil {
+		return nil, err
+	}
+
+	// 2) 解析 role_codes → role_id（提前校验，避免 quota 占了再回滚）
+	roleResolved, err := s.resolveRoleAssignments(ctx, in.BrandID, in.RoleCodes, in.LocationAssignments)
+	if err != nil {
+		return nil, err
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(in.InitialPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, apperr.ErrInternalF("加密密码失败", err)
+	}
+
+	// 3) 建 staff（仓储内事务：guard + INSERT brand_user + audit.staff_created）。
+	created, err := s.repo.Create(ctx, staff.CreateInput{
+		BrandID:         in.BrandID,
+		ActorID:         in.ActorID,
+		Phone:           in.Phone,
+		Name:            in.Name,
+		InitialPassword: string(hash),
+	})
+	if err != nil {
+		return nil, err
+	}
+	staffID := created.ID
+
+	// 5) 角色任职
+	if len(roleResolved) > 0 {
+		if _, err := s.repo.ReplaceRoleAssignments(ctx, in.BrandID, in.ActorID, staffID, roleResolved); err != nil {
+			return nil, err
+		}
+	}
+	// 6) Location 任职
+	if len(in.LocationAssignments) > 0 {
+		if _, err := s.repo.ReplaceLocationAssignments(ctx, in.BrandID, in.ActorID, staffID, in.LocationAssignments); err != nil {
+			return nil, err
+		}
+	}
+
+	return s.repo.GetWithAssignments(ctx, in.BrandID, staffID)
+}
+
+func validatePassword(p string) error {
+	if len(p) < passwordLen || len(p) > 64 {
+		return apperr.NewAppError(apperr.ErrInvalidParam, "密码长度需 8-64 位", 400)
+	}
+	if !passwordRules.MatchString(p) {
+		return apperr.NewAppError(apperr.ErrInvalidParam, "密码格式不合法", 400)
+	}
+	hasLetter, hasDigit := false, false
+	for _, c := range p {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+			hasLetter = true
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		return apperr.NewAppError(apperr.ErrInvalidParam, "密码需同时包含字母与数字", 400)
+	}
+	return nil
+}
+
+func validateLocationAssignments(items []staff.LocationAssignmentInput) error {
+	primary := 0
+	seen := map[int64]bool{}
+	for _, it := range items {
+		if seen[it.LocationID] {
+			return apperr.NewAppError(apperr.ErrLocationAssignmentInvalid, "门店任职重复", 400)
+		}
+		seen[it.LocationID] = true
+
+		switch it.AssignmentType {
+		case "member", "manager", "instructor", "assistant":
+		default:
+			return apperr.NewAppError(apperr.ErrInvalidParam, "门店任职类型不合法", 400)
+		}
+		if it.IsPrimary {
+			primary++
+		}
+	}
+	if primary > 1 {
+		return apperr.NewAppError(apperr.ErrInvalidParam, "最多 1 个门店任职可设为主要", 400)
+	}
+	return nil
+}
+
+// resolveRoleAssignments 把 role_codes / location_assignments 翻译成 role_resolved 列表。
+// 校验：role_code 存在、scope_type 与 location_id 匹配、禁止手动分配 brand_owner。
+func (s *Service) resolveRoleAssignments(
+	ctx context.Context,
+	brandID int64,
+	roleCodes []string,
+	locAssigns []staff.LocationAssignmentInput,
+) ([]staff.RoleAssignmentResolved, error) {
+	if len(roleCodes) == 0 {
+		return nil, nil
+	}
+	// 主 location_id 用于 location-scope 角色
+	var primaryLocID *int64
+	for i, la := range locAssigns {
+		if la.IsPrimary {
+			id := locAssigns[i].LocationID
+			primaryLocID = &id
+			break
+		}
+	}
+
+	out := make([]staff.RoleAssignmentResolved, 0, len(roleCodes))
+	for _, code := range roleCodes {
+		if code == "brand_owner" {
+			return nil, apperr.NewAppError(apperr.ErrInvalidParam, "品牌负责人角色不可手动分配", 400)
+		}
+		br, err := s.roleRepo.GetBrandRoleByCode(ctx, brandID, code)
+		if err != nil {
+			return nil, err
+		}
+		if br.Status != "active" {
+			return nil, apperr.NewAppError(apperr.ErrInvalidParam, "角色已停用："+code, 400)
+		}
+		resolved := staff.RoleAssignmentResolved{
+			RoleID:    br.ID,
+			ScopeType: br.ScopeType,
+			DataScope: role.DataScopeRoleDefault,
+		}
+		if br.ScopeType == role.ScopeLocation {
+			if primaryLocID == nil {
+				return nil, apperr.NewAppError(apperr.ErrInvalidParam, "门店级角色需要至少 1 个 location 任职并指定 primary", 400)
+			}
+			resolved.LocationID = primaryLocID
+		}
+		out = append(out, resolved)
+	}
+	return out, nil
+}
+
+func (s *Service) Get(ctx context.Context, brandID, id int64) (*staff.Staff, error) {
+	return s.repo.GetWithAssignments(ctx, brandID, id)
+}
+
+func (s *Service) List(ctx context.Context, in ListInput) ([]*staff.Staff, int64, error) {
+	page := in.Page
+	if page < 1 {
+		page = 1
+	}
+	size := in.PageSize
+	if size <= 0 {
+		size = 20
+	}
+	if size > 100 {
+		size = 100
+	}
+	return s.repo.List(ctx, staff.ListFilter{
+		BrandID:       in.BrandID,
+		Status:        in.Status,
+		HasInstructor: in.HasInstructor,
+		Search:        in.Search,
+	}, (page-1)*size, size)
+}
+
+func (s *Service) Update(ctx context.Context, brandID, id int64, in UpdateInput) (*staff.Staff, error) {
+	if in.Name != nil {
+		v := strings.TrimSpace(*in.Name)
+		if v == "" {
+			return nil, apperr.NewAppError(apperr.ErrInvalidParam, "姓名不能为空", 400)
+		}
+		if len([]rune(v)) > 50 {
+			return nil, apperr.NewAppError(apperr.ErrInvalidParam, "姓名过长", 400)
+		}
+		in.Name = &v
+	}
+	return s.repo.Update(ctx, brandID, id, in)
+}
+
+// UpdateStatus 切换 active / inactive。Owner 不可置 inactive。
+func (s *Service) UpdateStatus(ctx context.Context, brandID, actorID, id int64, status string) (*staff.Staff, error) {
+	if !staff.IsValidStatus(status) {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "员工状态无效", 400)
+	}
+	if status == string(staff.StatusInactive) {
+		if err := s.ensureNotLastActiveOwner(ctx, brandID, id); err != nil {
+			return nil, err
+		}
+	}
+	return s.repo.UpdateStatus(ctx, brandID, actorID, id, staff.Status(status))
+}
+
+func (s *Service) Delete(ctx context.Context, brandID, actorID, id int64) error {
+	if err := s.ensureNotLastActiveOwner(ctx, brandID, id); err != nil {
+		return err
+	}
+	return s.repo.SoftDelete(ctx, brandID, actorID, id)
+}
+
+// ensureNotLastActiveOwner 查目标是否 owner；如果是 owner 且 active_owner_count(brand)==1 → 拒。
+func (s *Service) ensureNotLastActiveOwner(ctx context.Context, brandID, id int64) error {
+	target, err := s.repo.GetByID(ctx, brandID, id)
+	if err != nil {
+		return err
+	}
+	if !target.IsOwner {
+		return nil
+	}
+	count, err := s.repo.CountActiveOwners(ctx, brandID)
+	if err != nil {
+		return err
+	}
+	if count <= 1 {
+		return apperr.NewAppError(apperr.ErrOwnerProtected, "不能删除/停用唯一的品牌负责人", 409)
+	}
+	return nil
+}
+
+// ReplaceRoleAssignments PUT /staff/:id/role-assignments
+func (s *Service) ReplaceRoleAssignments(
+	ctx context.Context, brandID, actorID, id int64, items []staff.RoleAssignmentInput,
+) (*staff.Staff, error) {
+	// 校验目标 staff 存在
+	if _, err := s.repo.GetByID(ctx, brandID, id); err != nil {
+		return nil, err
+	}
+
+	// 校验 + 解析每行
+	resolved := make([]staff.RoleAssignmentResolved, 0, len(items))
+	for _, it := range items {
+		if it.RoleCode == "brand_owner" {
+			return nil, apperr.NewAppError(apperr.ErrInvalidParam, "品牌负责人角色不可手动分配", 400)
+		}
+		br, err := s.roleRepo.GetBrandRoleByCode(ctx, brandID, it.RoleCode)
+		if err != nil {
+			return nil, err
+		}
+		if br.Status != "active" {
+			return nil, apperr.NewAppError(apperr.ErrInvalidParam, "角色已停用："+it.RoleCode, 400)
+		}
+		if br.ScopeType == role.ScopeLocation && it.LocationID == nil {
+			return nil, apperr.NewAppError(apperr.ErrInvalidParam, "门店级角色需 location_id", 400)
+		}
+		if br.ScopeType == role.ScopeBrand && it.LocationID != nil {
+			return nil, apperr.NewAppError(apperr.ErrInvalidParam, "品牌级角色不可绑定 location", 400)
+		}
+		ds := it.DataScope
+		if ds == "" {
+			ds = role.DataScopeRoleDefault
+		}
+		if !role.IsValidDataScope(ds) {
+			return nil, apperr.NewAppError(apperr.ErrInvalidParam, "data_scope 不合法", 400)
+		}
+		resolved = append(resolved, staff.RoleAssignmentResolved{
+			RoleID:     br.ID,
+			ScopeType:  br.ScopeType,
+			LocationID: it.LocationID,
+			DataScope:  ds,
+		})
+	}
+	if _, err := s.repo.ReplaceRoleAssignments(ctx, brandID, actorID, id, resolved); err != nil {
+		return nil, err
+	}
+	return s.repo.GetWithAssignments(ctx, brandID, id)
+}
+
+// ReplaceLocationAssignments PUT /staff/:id/location-assignments
+func (s *Service) ReplaceLocationAssignments(
+	ctx context.Context, brandID, actorID, id int64, items []staff.LocationAssignmentInput,
+) (*staff.Staff, error) {
+	if _, err := s.repo.GetByID(ctx, brandID, id); err != nil {
+		return nil, err
+	}
+	if err := validateLocationAssignments(items); err != nil {
+		return nil, err
+	}
+	if _, err := s.repo.ReplaceLocationAssignments(ctx, brandID, actorID, id, items); err != nil {
+		return nil, err
+	}
+	return s.repo.GetWithAssignments(ctx, brandID, id)
+}
+
+// GetInstructor 获取教练档案；如果 staff 跨 brand 则 404 STAFF_NOT_FOUND。
+func (s *Service) GetInstructor(ctx context.Context, brandID, staffID int64) (*instructor.Profile, error) {
+	if _, err := s.repo.GetByID(ctx, brandID, staffID); err != nil {
+		return nil, err
+	}
+	return s.instructorRepo.GetByBrandUserID(ctx, brandID, staffID)
+}
+
+// UpsertInstructor 编辑教练档案。
+func (s *Service) UpsertInstructor(ctx context.Context, brandID, actorID, staffID int64, in instructor.UpsertInput) (*instructor.Profile, error) {
+	if _, err := s.repo.GetByID(ctx, brandID, staffID); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(in.DisplayName) == "" {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "教练姓名不能为空", 400)
+	}
+	if in.Status == "" {
+		in.Status = instructor.StatusActive
+	}
+	if !instructor.IsValidStatus(string(in.Status)) {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "教练状态无效", 400)
+	}
+	in.BrandID = brandID
+	in.BrandUserID = staffID
+	return s.instructorRepo.Upsert(ctx, actorID, in)
+}
+
+// DeleteInstructor 注销教练档案。
+func (s *Service) DeleteInstructor(ctx context.Context, brandID, actorID, staffID int64) error {
+	if _, err := s.repo.GetByID(ctx, brandID, staffID); err != nil {
+		return err
+	}
+	return s.instructorRepo.Delete(ctx, brandID, actorID, staffID)
+}
+
+// ListRoles 暴露给 GET /brand/roles。
+func (s *Service) ListRoles(ctx context.Context, brandID int64) ([]*role.BrandRole, error) {
+	return s.roleRepo.ListBrandRoles(ctx, brandID)
+}
