@@ -39,3 +39,35 @@ psql -d mini_schedule -c 'ALTER TABLE brands ADD COLUMN IF NOT EXISTS descriptio
 2. Makefile 的硬编码 DSN 是开发体验黑洞，应改为读 `DATABASE_URL` 环境变量（生产 Railway 已经走这套）；或加 `make migrate-up-local` 用 `${PG_USER:-$USER}` 兜底。
 3. 启动 `api-*` 时建议加可选的 "schema drift check"：把 `migrations/*.up.sql` 的预期表/列与 `information_schema` 实际对比，drift 时打 warning（生产关闭）。
 4. 下一批起飞前先把 migration 自动化（boot 时 `migrate.Up()`）或在 CI 加 schema 校验，否则会重复踩这个坑。
+
+## 2026-06-06 Batch 5 验收期 bug
+
+### `json:",omitempty"` 把空数组从响应丢字段，前端 `.map()` 炸
+
+**症状**：Owner 账号刚注册、还没分门店任职时，`GET /api/v1/brand/staff/:id` 返回里 **没有** `location_assignments` 字段（不是 `[]`，是字段不存在）。前端 staff 详情页 `staff.location_assignments.map(...)` → `TypeError: Cannot read properties of undefined`。RoleAssignments 同款隐患——任何 staff 创建后角色未关联的瞬态都会复发。
+
+**根因**：domain `Staff` 结构体的两个数组字段打了 `json:"...,omitempty"`。Go 的 encoding/json 对 nil slice 和 长度为 0 的 slice 都视为"空"，omitempty 直接丢字段（不是写 `null`、不是写 `[]`）。Repository 层 `toStaffDomain` 又允许 nil slice 透传——双重失守。
+
+**修复**（commit `1b37b3a`）：
+1. 域结构体去掉两个 `,omitempty`：`RoleAssignments []RoleAssignment \`json:"role_assignments"\`` / `LocationAssignments []LocationAssignment \`json:"location_assignments"\``。
+2. `toStaffDomain` 入口规整 nil → 空切片，确保 `len==0` 时仍序列化为 `[]`。
+
+**通用化规则**：
+- **API 合约：任何前端会 `.map()` / `.length` / `forEach` 的数组字段都不要 `omitempty`**。omitempty 只适用于"前端读了就当没传"的可选标量（如 description）。
+- **Repository / mapper 层有义务 nil → 空切片规整**——不能依赖上游 service 记得加。Batch 6 起 Course / Learner 的 domain mapping 一律加这层。
+- 全仓 grep 排查未爆雷条目：`grep -RnE '\[\][A-Za-z].*omitempty' internal/domain/` 找出所有 `[]T ... omitempty` 字段，逐个评估前端是否会迭代。
+
+### Handler 绑定 `string` 但前端发 `string[]`，被 Gin 直接拒为 INVALID_REQUEST
+
+**症状**：教练资料 PUT `/api/v1/brand/staff/:id/instructor` 在前端弹窗保存时一律返 `400 INVALID_REQUEST {"error":"invalid request body"}`，service 层断点根本没进入。前端发的是 `{"specialties":["瑜伽","普拉提"],"certificates":["RYT200"]}`（chip 输入控件）。
+
+**根因**：handler `upsertInstructorBody` 把两个字段绑成 `Specialties string` / `Certificates string`，Gin `ShouldBindJSON` 走 encoding/json 反序列化，类型不匹配立即返 unmarshal 错误并被 handler 转成通用 `INVALID_REQUEST`，**错误信息不带字段名**——只有 access log 里 raw body 才看得出来 specialties 是 JSON array。DB 列 `VARCHAR(1000)` 设计是逗号分隔 CSV，但 Handler 既没有 alias 也没有显式 unmarshal，前端无法自察。
+
+**修复**（commit `97a33bb`）：
+1. Handler 绑成 `[]string`，内部 `joinCSV()`（trim + 跳空）合成逗号字符串再交给 service / DB，保持 domain / DB schema 不变。
+2. Response 用 embedding 结构 `instructorProfileResponse` 把 domain.Profile 的 CSV `splitCSV()` 还原成 `[]string`，对称前端写入形状。
+
+**通用化规则**：
+- **DB 列即便是单 `VARCHAR`，handler 也接受 `[]string`**，内部 join/split 桥接。理由：前端控件（chip / tag input）天然产出数组；如果让前端 join，每个调用点都要复制 trim/dedup/skip-empty 逻辑，必然漂移。
+- Handler 加 helper `joinCSV` / `splitCSV` 统一 trim + 跳空 + 可选 dedup，杜绝"前导/尾随空逗号"脏数据进库。
+- 通用 INVALID_REQUEST 调试线索藏在 access log 的 raw body；建议下一批给 `response.Error` 在 bind error 分支带上 unmarshal 错误的 field path（`json.UnmarshalTypeError.Field`），调试链路缩短一个量级。
