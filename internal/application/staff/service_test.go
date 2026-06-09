@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/zkw/mini-schedule/backend/internal/domain/instructor"
+	domainrbac "github.com/zkw/mini-schedule/backend/internal/domain/rbac"
 	"github.com/zkw/mini-schedule/backend/internal/domain/role"
 	"github.com/zkw/mini-schedule/backend/internal/domain/staff"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
@@ -113,6 +114,30 @@ func (f *fakeInstrRepo) Delete(_ context.Context, _, _, _ int64) error { return 
 
 // ---- tests ----
 
+// fakePermissionChecker records Require calls and returns configured errors.
+type fakePermissionChecker struct {
+	requireErrs  map[string]error // by permission code; nil → permit
+	requireSeen  []string
+	resolveErr   error
+	resolveSet   domainrbac.PermissionSet
+	resolveScope domainrbac.DataScope
+}
+
+func (f *fakePermissionChecker) Require(_ context.Context, _, _ int64, code string) error {
+	f.requireSeen = append(f.requireSeen, code)
+	if f.requireErrs == nil {
+		return nil
+	}
+	if err, ok := f.requireErrs[code]; ok {
+		return err
+	}
+	return nil
+}
+
+func (f *fakePermissionChecker) Resolve(_ context.Context, _, _ int64) (domainrbac.PermissionSet, domainrbac.DataScope, error) {
+	return f.resolveSet, f.resolveScope, f.resolveErr
+}
+
 func newSvc(sr *fakeStaffRepo, rr *fakeRoleRepo, ir *fakeInstrRepo) *Service {
 	if rr == nil {
 		rr = &fakeRoleRepo{byCode: map[string]*role.BrandRole{}}
@@ -120,7 +145,17 @@ func newSvc(sr *fakeStaffRepo, rr *fakeRoleRepo, ir *fakeInstrRepo) *Service {
 	if ir == nil {
 		ir = &fakeInstrRepo{}
 	}
-	return NewService(sr, rr, ir)
+	return NewService(sr, rr, ir, nil)
+}
+
+func newSvcWithChecker(sr *fakeStaffRepo, rr *fakeRoleRepo, ir *fakeInstrRepo, ch *fakePermissionChecker) *Service {
+	if rr == nil {
+		rr = &fakeRoleRepo{byCode: map[string]*role.BrandRole{}}
+	}
+	if ir == nil {
+		ir = &fakeInstrRepo{}
+	}
+	return NewService(sr, rr, ir, ch)
 }
 
 func TestCreate_BadPhone(t *testing.T) {
@@ -383,8 +418,142 @@ func TestUpsertInstructor_DefaultsActiveStatus(t *testing.T) {
 func TestGetInstructor_CrossBrandReturnsStaffNotFound(t *testing.T) {
 	sr := &fakeStaffRepo{getByIDErr: apperr.NewAppError(apperr.ErrStaffNotFound, "x", 404)}
 	svc := newSvc(sr, nil, &fakeInstrRepo{})
-	_, err := svc.GetInstructor(context.Background(), 1, 999)
+	_, err := svc.GetInstructor(context.Background(), 1, 0, 999)
 	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrStaffNotFound {
 		t.Errorf("expected STAFF_NOT_FOUND, got %v", err)
 	}
 }
+
+// ---- Batch 6: RequirePermission gates ----
+
+func deniedErr(code string) error {
+	return apperr.NewAppError(apperr.ErrPermissionDenied, "权限不足", 403).
+		WithDetails(map[string]any{"required": code, "missing": []string{code}})
+}
+
+func TestCreate_PermissionDenied(t *testing.T) {
+	// E1
+	ch := &fakePermissionChecker{requireErrs: map[string]error{"staff.create": deniedErr("staff.create")}}
+	svc := newSvcWithChecker(&fakeStaffRepo{}, nil, nil, ch)
+	_, err := svc.Create(context.Background(), CreateInput{BrandID: 1, ActorID: 18, Phone: "13900139001", Name: "x", InitialPassword: "test1234"})
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+func TestList_RequiresStaffView(t *testing.T) {
+	ch := &fakePermissionChecker{requireErrs: map[string]error{"staff.view": deniedErr("staff.view")}}
+	svc := newSvcWithChecker(&fakeStaffRepo{}, nil, nil, ch)
+	_, _, err := svc.List(context.Background(), ListInput{BrandID: 1, ActorID: 18})
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+func TestDelete_PermissionDenied(t *testing.T) {
+	// E4 — 张三尝试删除自己（没有 staff.delete）
+	ch := &fakePermissionChecker{requireErrs: map[string]error{"staff.delete": deniedErr("staff.delete")}}
+	sr := &fakeStaffRepo{getByID: &staff.Staff{ID: 18, BrandID: 1, IsOwner: false}}
+	svc := newSvcWithChecker(sr, nil, nil, ch)
+	err := svc.Delete(context.Background(), 1, 18, 18)
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+func TestReplaceRoleAssignments_PermissionDenied(t *testing.T) {
+	// E5 — 没有 staff.assign_role
+	ch := &fakePermissionChecker{requireErrs: map[string]error{"staff.assign_role": deniedErr("staff.assign_role")}}
+	sr := &fakeStaffRepo{getByID: &staff.Staff{ID: 18, BrandID: 1}}
+	svc := newSvcWithChecker(sr, nil, nil, ch)
+	_, err := svc.ReplaceRoleAssignments(context.Background(), 1, 18, 18, nil)
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+func TestReplaceLocationAssignments_RequiresAssignLocation(t *testing.T) {
+	// E7 implicit — 张三 ReplaceLocationAssignments 需 staff.assign_location
+	ch := &fakePermissionChecker{requireErrs: map[string]error{"staff.assign_location": deniedErr("staff.assign_location")}}
+	sr := &fakeStaffRepo{getByID: &staff.Staff{ID: 18, BrandID: 1}}
+	svc := newSvcWithChecker(sr, nil, nil, ch)
+	_, err := svc.ReplaceLocationAssignments(context.Background(), 1, 18, 18, nil)
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+func TestUpsertInstructor_RequiresInstructorEdit(t *testing.T) {
+	ch := &fakePermissionChecker{requireErrs: map[string]error{"instructor.edit": deniedErr("instructor.edit")}}
+	sr := &fakeStaffRepo{getByID: &staff.Staff{ID: 18, BrandID: 1}}
+	svc := newSvcWithChecker(sr, nil, &fakeInstrRepo{}, ch)
+	_, err := svc.UpsertInstructor(context.Background(), 1, 18, 18, instructor.UpsertInput{DisplayName: "x"})
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+func TestGetInstructor_RequiresInstructorView(t *testing.T) {
+	ch := &fakePermissionChecker{requireErrs: map[string]error{"instructor.view": deniedErr("instructor.view")}}
+	sr := &fakeStaffRepo{getByID: &staff.Staff{ID: 18, BrandID: 1}}
+	svc := newSvcWithChecker(sr, nil, &fakeInstrRepo{}, ch)
+	_, err := svc.GetInstructor(context.Background(), 1, 18, 18)
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+func TestUpdate_RequiresStaffEdit(t *testing.T) {
+	ch := &fakePermissionChecker{requireErrs: map[string]error{"staff.edit": deniedErr("staff.edit")}}
+	sr := &fakeStaffRepo{getAssign: &staff.Staff{ID: 18}}
+	svc := newSvcWithChecker(sr, nil, nil, ch)
+	_, err := svc.Update(context.Background(), 1, 18, 18, staff.UpdateInput{})
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+func TestUpdateStatus_RequiresStaffEdit(t *testing.T) {
+	ch := &fakePermissionChecker{requireErrs: map[string]error{"staff.edit": deniedErr("staff.edit")}}
+	sr := &fakeStaffRepo{getAssign: &staff.Staff{ID: 18}}
+	svc := newSvcWithChecker(sr, nil, nil, ch)
+	_, err := svc.UpdateStatus(context.Background(), 1, 18, 18, "active")
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+func TestListRoles_RequiresStaffView(t *testing.T) {
+	ch := &fakePermissionChecker{requireErrs: map[string]error{"staff.view": deniedErr("staff.view")}}
+	svc := newSvcWithChecker(&fakeStaffRepo{}, nil, nil, ch)
+	_, err := svc.ListRoles(context.Background(), 1, 18)
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+// Bridge: when checker permits, original behaviour is intact (regression — E33).
+func TestCreate_CheckerPermitsThenContinues(t *testing.T) {
+	ch := &fakePermissionChecker{}
+	sr := &fakeStaffRepo{
+		created:   &staff.Staff{ID: 99, BrandID: 1},
+		getAssign: &staff.Staff{ID: 99, BrandID: 1},
+	}
+	svc := newSvcWithChecker(sr, nil, nil, ch)
+	if _, err := svc.Create(context.Background(), CreateInput{BrandID: 1, ActorID: 16, Phone: "13900139001", Name: "x", InitialPassword: "test1234"}); err != nil {
+		t.Fatalf("expected success when checker permits, got %v", err)
+	}
+	seen := false
+	for _, c := range ch.requireSeen {
+		if c == "staff.create" {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		t.Fatalf("expected staff.create check, saw %v", ch.requireSeen)
+	}
+}
+
+// Silence the unused-var warning from domainrbac import when test list is small.
+var _ = domainrbac.DataScope{}

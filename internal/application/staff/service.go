@@ -12,19 +12,32 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/zkw/mini-schedule/backend/internal/domain/instructor"
+	domainrbac "github.com/zkw/mini-schedule/backend/internal/domain/rbac"
 	"github.com/zkw/mini-schedule/backend/internal/domain/role"
 	"github.com/zkw/mini-schedule/backend/internal/domain/staff"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
 
+// PermissionChecker is the minimal Checker surface staff.Service needs. Defined
+// here (rather than imported from application/rbac) to keep this package free of
+// the rbac package's transitive Redis dependency in tests.
+type PermissionChecker interface {
+	Require(ctx context.Context, brandID, brandUserID int64, code string) error
+	Resolve(ctx context.Context, brandID, brandUserID int64) (domainrbac.PermissionSet, domainrbac.DataScope, error)
+}
+
 // Service 编排 staff CRUD + 角色 / 任职 / 教练。
 //
 // 注：subscription quota 校验下沉到 staff_repository.Create 的事务内，
 // 复用 location_repository 同款 SubscriptionGuard 模板。
+//
+// Batch 6: checker 注入用于每个 method 头部 RequirePermission 校验。
+// nil checker（仅注册流程 / system-internal 路径）会跳过校验。
 type Service struct {
 	repo           staff.Repository
 	roleRepo       role.Repository
 	instructorRepo instructor.Repository
+	checker        PermissionChecker
 }
 
 // NewService 构造函数（Wire 会注入）。
@@ -32,12 +45,35 @@ func NewService(
 	repo staff.Repository,
 	roleRepo role.Repository,
 	instructorRepo instructor.Repository,
+	checker PermissionChecker,
 ) *Service {
 	return &Service{
 		repo:           repo,
 		roleRepo:       roleRepo,
 		instructorRepo: instructorRepo,
+		checker:        checker,
 	}
+}
+
+// require 包装 checker.Require，checker == nil 时跳过（兼容旧测试 / 引导调用）。
+func (s *Service) require(ctx context.Context, brandID, actorID int64, code string) error {
+	if s.checker == nil {
+		return nil
+	}
+	return s.checker.Require(ctx, brandID, actorID, code)
+}
+
+// resolveScope 拿当前 actor 的 DataScope（owner / all_brand → nil，其余转换为
+// location_ids 集合给 repo 过滤）。
+func (s *Service) resolveScope(ctx context.Context, brandID, actorID int64) (*domainrbac.DataScope, error) {
+	if s.checker == nil {
+		return nil, nil
+	}
+	_, scope, err := s.checker.Resolve(ctx, brandID, actorID)
+	if err != nil {
+		return nil, err
+	}
+	return &scope, nil
 }
 
 // Public input types（handler 直接构造，不经 domain）。
@@ -56,6 +92,7 @@ type UpdateInput = staff.UpdateInput
 
 type ListInput struct {
 	BrandID       int64
+	ActorID       int64
 	Status        string
 	HasInstructor *bool
 	Search        string
@@ -70,6 +107,9 @@ var (
 )
 
 func (s *Service) Create(ctx context.Context, in CreateInput) (*staff.Staff, error) {
+	if err := s.require(ctx, in.BrandID, in.ActorID, "staff.create"); err != nil {
+		return nil, err
+	}
 	if in.BrandID <= 0 {
 		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "品牌 ID 无效", 400)
 	}
@@ -226,11 +266,17 @@ func (s *Service) resolveRoleAssignments(
 	return out, nil
 }
 
-func (s *Service) Get(ctx context.Context, brandID, id int64) (*staff.Staff, error) {
+func (s *Service) Get(ctx context.Context, brandID, actorID, id int64) (*staff.Staff, error) {
+	if err := s.require(ctx, brandID, actorID, "staff.view"); err != nil {
+		return nil, err
+	}
 	return s.repo.GetWithAssignments(ctx, brandID, id)
 }
 
 func (s *Service) List(ctx context.Context, in ListInput) ([]*staff.Staff, int64, error) {
+	if err := s.require(ctx, in.BrandID, in.ActorID, "staff.view"); err != nil {
+		return nil, 0, err
+	}
 	page := in.Page
 	if page < 1 {
 		page = 1
@@ -251,6 +297,9 @@ func (s *Service) List(ctx context.Context, in ListInput) ([]*staff.Staff, int64
 }
 
 func (s *Service) Update(ctx context.Context, brandID, actorID, id int64, in UpdateInput) (*staff.Staff, error) {
+	if err := s.require(ctx, brandID, actorID, "staff.edit"); err != nil {
+		return nil, err
+	}
 	if in.Name != nil {
 		v := strings.TrimSpace(*in.Name)
 		if v == "" {
@@ -266,6 +315,9 @@ func (s *Service) Update(ctx context.Context, brandID, actorID, id int64, in Upd
 
 // UpdateStatus 切换 active / inactive。Owner 不可置 inactive。
 func (s *Service) UpdateStatus(ctx context.Context, brandID, actorID, id int64, status string) (*staff.Staff, error) {
+	if err := s.require(ctx, brandID, actorID, "staff.edit"); err != nil {
+		return nil, err
+	}
 	if !staff.IsValidStatus(status) {
 		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "员工状态无效", 400)
 	}
@@ -278,6 +330,9 @@ func (s *Service) UpdateStatus(ctx context.Context, brandID, actorID, id int64, 
 }
 
 func (s *Service) Delete(ctx context.Context, brandID, actorID, id int64) error {
+	if err := s.require(ctx, brandID, actorID, "staff.delete"); err != nil {
+		return err
+	}
 	if err := s.ensureNotLastActiveOwner(ctx, brandID, id); err != nil {
 		return err
 	}
@@ -307,6 +362,9 @@ func (s *Service) ensureNotLastActiveOwner(ctx context.Context, brandID, id int6
 func (s *Service) ReplaceRoleAssignments(
 	ctx context.Context, brandID, actorID, id int64, items []staff.RoleAssignmentInput,
 ) (*staff.Staff, error) {
+	if err := s.require(ctx, brandID, actorID, "staff.assign_role"); err != nil {
+		return nil, err
+	}
 	// 校验目标 staff 存在
 	target, err := s.repo.GetByID(ctx, brandID, id)
 	if err != nil {
@@ -363,6 +421,9 @@ func (s *Service) ReplaceRoleAssignments(
 func (s *Service) ReplaceLocationAssignments(
 	ctx context.Context, brandID, actorID, id int64, items []staff.LocationAssignmentInput,
 ) (*staff.Staff, error) {
+	if err := s.require(ctx, brandID, actorID, "staff.assign_location"); err != nil {
+		return nil, err
+	}
 	if _, err := s.repo.GetByID(ctx, brandID, id); err != nil {
 		return nil, err
 	}
@@ -376,7 +437,10 @@ func (s *Service) ReplaceLocationAssignments(
 }
 
 // GetInstructor 获取教练档案；如果 staff 跨 brand 则 404 STAFF_NOT_FOUND。
-func (s *Service) GetInstructor(ctx context.Context, brandID, staffID int64) (*instructor.Profile, error) {
+func (s *Service) GetInstructor(ctx context.Context, brandID, actorID, staffID int64) (*instructor.Profile, error) {
+	if err := s.require(ctx, brandID, actorID, "instructor.view"); err != nil {
+		return nil, err
+	}
 	if _, err := s.repo.GetByID(ctx, brandID, staffID); err != nil {
 		return nil, err
 	}
@@ -385,6 +449,9 @@ func (s *Service) GetInstructor(ctx context.Context, brandID, staffID int64) (*i
 
 // UpsertInstructor 编辑教练档案。
 func (s *Service) UpsertInstructor(ctx context.Context, brandID, actorID, staffID int64, in instructor.UpsertInput) (*instructor.Profile, error) {
+	if err := s.require(ctx, brandID, actorID, "instructor.edit"); err != nil {
+		return nil, err
+	}
 	if _, err := s.repo.GetByID(ctx, brandID, staffID); err != nil {
 		return nil, err
 	}
@@ -404,6 +471,9 @@ func (s *Service) UpsertInstructor(ctx context.Context, brandID, actorID, staffI
 
 // DeleteInstructor 注销教练档案。
 func (s *Service) DeleteInstructor(ctx context.Context, brandID, actorID, staffID int64) error {
+	if err := s.require(ctx, brandID, actorID, "instructor.edit"); err != nil {
+		return err
+	}
 	if _, err := s.repo.GetByID(ctx, brandID, staffID); err != nil {
 		return err
 	}
@@ -411,6 +481,33 @@ func (s *Service) DeleteInstructor(ctx context.Context, brandID, actorID, staffI
 }
 
 // ListRoles 暴露给 GET /brand/roles。
-func (s *Service) ListRoles(ctx context.Context, brandID int64) ([]*role.BrandRole, error) {
+func (s *Service) ListRoles(ctx context.Context, brandID, actorID int64) ([]*role.BrandRole, error) {
+	if err := s.require(ctx, brandID, actorID, "staff.view"); err != nil {
+		return nil, err
+	}
 	return s.roleRepo.ListBrandRoles(ctx, brandID)
+}
+
+// GetRole 单角色详情，含 permissions。
+func (s *Service) GetRole(ctx context.Context, brandID, actorID int64, code string) (*role.BrandRole, error) {
+	if err := s.require(ctx, brandID, actorID, "staff.view"); err != nil {
+		return nil, err
+	}
+	br, err := s.roleRepo.GetBrandRoleByCode(ctx, brandID, code)
+	if err != nil {
+		return nil, err
+	}
+	// Fetch permissions for this role via the list path; cheap because we know
+	// the single role's permission set is loaded eagerly by ListBrandRoles, but
+	// we don't have a single-role-with-perms accessor. Refetch via list filter.
+	roles, err := s.roleRepo.ListBrandRoles(ctx, brandID)
+	if err != nil {
+		return br, nil
+	}
+	for _, r := range roles {
+		if r.Code == code {
+			return r, nil
+		}
+	}
+	return br, nil
 }

@@ -67,7 +67,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	staffRepository := persistence.NewStaffRepository(db, subscriptionGuard)
 	roleRepository := persistence.NewRoleRepository(db)
 	instructorRepository := persistence.NewInstructorRepository(db)
-	staffService := staff.NewService(staffRepository, roleRepository, instructorRepository)
+	staffService := staff.NewService(staffRepository, roleRepository, instructorRepository, nil)
 	staffHandler := brand2.NewStaffHandler(staffService)
 	handler := brand2.NewHandler(service, brandUserService, appUserService, courseService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler, staffHandler)
 	commercialRepository := persistence.NewCommercialRepository(db)

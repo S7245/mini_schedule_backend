@@ -54,6 +54,7 @@ func (h *StaffHandler) list(c *gin.Context) {
 
 	items, total, err := h.svc.List(c.Request.Context(), appStaff.ListInput{
 		BrandID:       brandID,
+		ActorID:       middleware.GetUserID(c),
 		Status:        status,
 		HasInstructor: hasInstr,
 		Search:        search,
@@ -69,12 +70,13 @@ func (h *StaffHandler) list(c *gin.Context) {
 
 func (h *StaffHandler) get(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
 	id, err := parseStaffID(c)
 	if err != nil {
 		response.Error(c, err)
 		return
 	}
-	s, err := h.svc.Get(c.Request.Context(), brandID, id)
+	s, err := h.svc.Get(c.Request.Context(), brandID, actorID, id)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -265,12 +267,13 @@ func (h *StaffHandler) replaceLocationAssignments(c *gin.Context) {
 
 func (h *StaffHandler) getInstructor(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
 	id, err := parseStaffID(c)
 	if err != nil {
 		response.Error(c, err)
 		return
 	}
-	p, err := h.svc.GetInstructor(c.Request.Context(), brandID, id)
+	p, err := h.svc.GetInstructor(c.Request.Context(), brandID, actorID, id)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -382,7 +385,8 @@ func (h *StaffHandler) deleteInstructor(c *gin.Context) {
 
 func (h *StaffHandler) listRoles(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
-	roles, err := h.svc.ListRoles(c.Request.Context(), brandID)
+	actorID := middleware.GetUserID(c)
+	roles, err := h.svc.ListRoles(c.Request.Context(), brandID, actorID)
 	if err != nil {
 		response.Error(c, err)
 		return
