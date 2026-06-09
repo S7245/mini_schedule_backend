@@ -5,17 +5,32 @@ import (
 	"strings"
 
 	domainlocation "github.com/zkw/mini-schedule/backend/internal/domain/location"
+	domainrbac "github.com/zkw/mini-schedule/backend/internal/domain/rbac"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
 
-// Service Location 应用服务，编排 CRUD + quota（quota 校验下沉到 repository 事务内）。
-type Service struct {
-	repo domainlocation.Repository
+// PermissionChecker is the minimal Checker surface location.Service needs.
+type PermissionChecker interface {
+	Require(ctx context.Context, brandID, brandUserID int64, code string) error
+	Resolve(ctx context.Context, brandID, brandUserID int64) (domainrbac.PermissionSet, domainrbac.DataScope, error)
 }
 
-// NewService 创建 Service。
-func NewService(repo domainlocation.Repository) *Service {
-	return &Service{repo: repo}
+// Service Location 应用服务，编排 CRUD + quota（quota 校验下沉到 repository 事务内）。
+type Service struct {
+	repo    domainlocation.Repository
+	checker PermissionChecker
+}
+
+// NewService 创建 Service。checker == nil 时跳过 RequirePermission（兼容 bootstrap 路径）。
+func NewService(repo domainlocation.Repository, checker PermissionChecker) *Service {
+	return &Service{repo: repo, checker: checker}
+}
+
+func (s *Service) require(ctx context.Context, brandID, actorID int64, code string) error {
+	if s.checker == nil {
+		return nil
+	}
+	return s.checker.Require(ctx, brandID, actorID, code)
 }
 
 // CreateInput 创建入参。
@@ -39,6 +54,7 @@ type UpdateInput struct {
 // ListInput 列表查询。
 type ListInput struct {
 	BrandID  int64
+	ActorID  int64
 	Status   string // "active" / "inactive" / "" / "all"
 	Page     int
 	PageSize int
@@ -46,6 +62,9 @@ type ListInput struct {
 
 // Create 创建门店；quota / subscription 校验在 repository 内单事务串行化。
 func (s *Service) Create(ctx context.Context, in CreateInput) (*domainlocation.Location, error) {
+	if err := s.require(ctx, in.BrandID, in.ActorID, "location.create"); err != nil {
+		return nil, err
+	}
 	if in.BrandID <= 0 {
 		return nil, apperr.ErrBadRequest("品牌 ID 无效")
 	}
@@ -66,12 +85,18 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domainlocation.L
 }
 
 // Get 详情。
-func (s *Service) Get(ctx context.Context, brandID, id int64) (*domainlocation.Location, error) {
+func (s *Service) Get(ctx context.Context, brandID, actorID, id int64) (*domainlocation.Location, error) {
+	if err := s.require(ctx, brandID, actorID, "location.view"); err != nil {
+		return nil, err
+	}
 	return s.repo.GetByID(ctx, brandID, id)
 }
 
 // List 列表（含分页 + 状态过滤）。
 func (s *Service) List(ctx context.Context, in ListInput) ([]*domainlocation.Location, int64, error) {
+	if err := s.require(ctx, in.BrandID, in.ActorID, "location.view"); err != nil {
+		return nil, 0, err
+	}
 	page := in.Page
 	if page < 1 {
 		page = 1
@@ -96,7 +121,10 @@ func (s *Service) List(ctx context.Context, in ListInput) ([]*domainlocation.Loc
 }
 
 // Update 普通字段编辑。per 契约 Q5：本批不写 OperationLog（只创建 / 状态切换 / 删除 才写）。
-func (s *Service) Update(ctx context.Context, brandID, id int64, in UpdateInput) (*domainlocation.Location, error) {
+func (s *Service) Update(ctx context.Context, brandID, actorID, id int64, in UpdateInput) (*domainlocation.Location, error) {
+	if err := s.require(ctx, brandID, actorID, "location.edit"); err != nil {
+		return nil, err
+	}
 	if in.Name != nil {
 		v := strings.TrimSpace(*in.Name)
 		if v == "" {
@@ -117,6 +145,9 @@ func (s *Service) Update(ctx context.Context, brandID, id int64, in UpdateInput)
 
 // UpdateStatus 状态切换（active / inactive）。
 func (s *Service) UpdateStatus(ctx context.Context, brandID, actorID, id int64, status string) (*domainlocation.Location, error) {
+	if err := s.require(ctx, brandID, actorID, "location.edit"); err != nil {
+		return nil, err
+	}
 	if !domainlocation.IsValidStatus(status) {
 		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "无效的门店状态", 400)
 	}
@@ -125,5 +156,8 @@ func (s *Service) UpdateStatus(ctx context.Context, brandID, actorID, id int64, 
 
 // Delete 软删。
 func (s *Service) Delete(ctx context.Context, brandID, actorID, id int64) error {
+	if err := s.require(ctx, brandID, actorID, "location.delete"); err != nil {
+		return err
+	}
 	return s.repo.SoftDelete(ctx, brandID, actorID, id)
 }

@@ -77,6 +77,7 @@ func (h *LocationHandler) list(c *gin.Context) {
 
 	items, total, err := h.svc.List(c.Request.Context(), appLocation.ListInput{
 		BrandID:  brandID,
+		ActorID:  middleware.GetUserID(c),
 		Status:   status,
 		Page:     page,
 		PageSize: pageSize,
@@ -90,12 +91,13 @@ func (h *LocationHandler) list(c *gin.Context) {
 
 func (h *LocationHandler) get(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		response.Error(c, apperr.NewAppError(apperr.ErrLocationNotFound, "门店不存在", 404))
 		return
 	}
-	loc, err := h.svc.Get(c.Request.Context(), brandID, id)
+	loc, err := h.svc.Get(c.Request.Context(), brandID, actorID, id)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -112,6 +114,7 @@ type updateLocationBody struct {
 
 func (h *LocationHandler) update(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		response.Error(c, apperr.NewAppError(apperr.ErrLocationNotFound, "门店不存在", 404))
@@ -122,7 +125,7 @@ func (h *LocationHandler) update(c *gin.Context) {
 		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
 		return
 	}
-	loc, err := h.svc.Update(c.Request.Context(), brandID, id, appLocation.UpdateInput{
+	loc, err := h.svc.Update(c.Request.Context(), brandID, actorID, id, appLocation.UpdateInput{
 		Name:    body.Name,
 		Address: body.Address,
 		Phone:   body.Phone,
