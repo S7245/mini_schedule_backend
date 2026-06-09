@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/audit"
@@ -173,12 +174,42 @@ func (r *staffRepository) List(ctx context.Context, filter staff.ListFilter, off
 	return items, total, nil
 }
 
-func (r *staffRepository) Update(ctx context.Context, brandID, id int64, in staff.UpdateInput) (*staff.Staff, error) {
-	if err := r.db.WithContext(ctx).
-		Model(&brandUserWithOwnerModel{}).
-		Where("id = ? AND brand_id = ? AND deleted_at IS NULL", id, brandID).
-		Updates(buildStaffUpdates(in)).Error; err != nil {
-		return nil, apperr.ErrInternalF("更新员工失败", err)
+// Update 编辑 staff 基础字段；事务内拉 before → UPDATE → 写 audit（review B2）。
+// 无变更时为 no-op，不写 audit。
+func (r *staffRepository) Update(ctx context.Context, brandID, actorID, id int64, in staff.UpdateInput) (*staff.Staff, error) {
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var before brandUserWithOwnerModel
+		if err := tx.Where("id = ? AND brand_id = ? AND deleted_at IS NULL", id, brandID).First(&before).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrStaffNotFound, "员工不存在", 404)
+			}
+			return apperr.ErrInternalF("查询员工失败", err)
+		}
+		updates := buildStaffUpdates(in)
+		if len(updates) == 0 {
+			return nil // no-op：无字段改 → 不写 audit
+		}
+		if err := tx.Model(&brandUserWithOwnerModel{}).
+			Where("id = ?", id).
+			Updates(updates).Error; err != nil {
+			return apperr.ErrInternalF("更新员工失败", err)
+		}
+		after := before
+		if in.Name != nil {
+			after.Name = *in.Name
+		}
+		bID := brandID
+		return audit.Write(tx, audit.Event{
+			BrandID: &bID,
+			Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: actorID},
+			Action:  "staff_updated",
+			Target:  audit.Target{Type: "staff", ID: id},
+			Before:  &before,
+			After:   &after,
+		})
+	})
+	if err != nil {
+		return nil, err
 	}
 	return r.GetWithAssignments(ctx, brandID, id)
 }
@@ -270,6 +301,18 @@ func (r *staffRepository) ReplaceRoleAssignments(
 	var savedIDs []int64
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// review B5：先锁 brand_user 行，串行化同一员工的并发 PUT，避免 last-writer-wins
+		// 和 audit before 漂移。同时校验 staff 存在 + 属于本 brand。
+		var staffRow brandUserWithOwnerModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND brand_id = ? AND deleted_at IS NULL", brandUserID, brandID).
+			First(&staffRow).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrStaffNotFound, "员工不存在", 404)
+			}
+			return apperr.ErrInternalF("锁定员工失败", err)
+		}
+
 		// 单事务：拉 before（用于 audit）→ 全量 DELETE → INSERT 新 → 写 audit
 		var before []BrandUserRoleAssignmentModel
 		if err := tx.Where("brand_id = ? AND brand_user_id = ?", brandID, brandUserID).Find(&before).Error; err != nil {
@@ -317,6 +360,17 @@ func (r *staffRepository) ReplaceLocationAssignments(
 	ctx context.Context, brandID, actorID, brandUserID int64, items []staff.LocationAssignmentInput,
 ) ([]staff.LocationAssignment, error) {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// review B5：同 ReplaceRoleAssignments，锁 brand_user 行以串行化并发 PUT。
+		var staffRow brandUserWithOwnerModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND brand_id = ? AND deleted_at IS NULL", brandUserID, brandID).
+			First(&staffRow).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrStaffNotFound, "员工不存在", 404)
+			}
+			return apperr.ErrInternalF("锁定员工失败", err)
+		}
+
 		var before []StaffLocationAssignmentModel
 		if err := tx.Where("brand_id = ? AND brand_user_id = ?", brandID, brandUserID).Find(&before).Error; err != nil {
 			return apperr.ErrInternalF("查询 Location 任职失败", err)

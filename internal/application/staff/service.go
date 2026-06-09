@@ -250,7 +250,7 @@ func (s *Service) List(ctx context.Context, in ListInput) ([]*staff.Staff, int64
 	}, (page-1)*size, size)
 }
 
-func (s *Service) Update(ctx context.Context, brandID, id int64, in UpdateInput) (*staff.Staff, error) {
+func (s *Service) Update(ctx context.Context, brandID, actorID, id int64, in UpdateInput) (*staff.Staff, error) {
 	if in.Name != nil {
 		v := strings.TrimSpace(*in.Name)
 		if v == "" {
@@ -261,7 +261,7 @@ func (s *Service) Update(ctx context.Context, brandID, id int64, in UpdateInput)
 		}
 		in.Name = &v
 	}
-	return s.repo.Update(ctx, brandID, id, in)
+	return s.repo.Update(ctx, brandID, actorID, id, in)
 }
 
 // UpdateStatus 切换 active / inactive。Owner 不可置 inactive。
@@ -308,8 +308,16 @@ func (s *Service) ReplaceRoleAssignments(
 	ctx context.Context, brandID, actorID, id int64, items []staff.RoleAssignmentInput,
 ) (*staff.Staff, error) {
 	// 校验目标 staff 存在
-	if _, err := s.repo.GetByID(ctx, brandID, id); err != nil {
+	target, err := s.repo.GetByID(ctx, brandID, id)
+	if err != nil {
 		return nil, err
+	}
+
+	// review B4：owner 的角色集合不可被 PUT 修改。owner 的 brand_owner 关联只能由 backfill /
+	// 注册流程维护；如果允许此处替换，brand_admin 一调用就能静默清掉 owner 的全部权限
+	// （包括 brand_owner）— 是事实上的权限提升 + 否认服务漏洞。
+	if target.IsOwner {
+		return nil, apperr.NewAppError(apperr.ErrOwnerProtected, "品牌负责人的角色不可手动修改", 409)
 	}
 
 	// 校验 + 解析每行

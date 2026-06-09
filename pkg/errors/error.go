@@ -64,6 +64,8 @@ const (
 	ErrRoleNotFound              ErrorCode = "ROLE_NOT_FOUND"
 	ErrLocationAssignmentInvalid ErrorCode = "LOCATION_ASSIGNMENT_INVALID"
 	ErrInstructorProfileNotFound ErrorCode = "INSTRUCTOR_PROFILE_NOT_FOUND"
+	// review B8：并发 PUT instructor 撞 unique index 时使用，前端可据此提示"另一会话已建好"。
+	ErrInstructorProfileConflict ErrorCode = "INSTRUCTOR_PROFILE_CONFLICT"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码

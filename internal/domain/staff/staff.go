@@ -103,7 +103,7 @@ type Repository interface {
 	GetByID(ctx context.Context, brandID, id int64) (*Staff, error)
 	GetWithAssignments(ctx context.Context, brandID, id int64) (*Staff, error)
 	List(ctx context.Context, filter ListFilter, offset, limit int) ([]*Staff, int64, error)
-	Update(ctx context.Context, brandID, id int64, in UpdateInput) (*Staff, error)
+	Update(ctx context.Context, brandID, actorID, id int64, in UpdateInput) (*Staff, error)
 	UpdateStatus(ctx context.Context, brandID, actorID, id int64, status Status) (*Staff, error)
 	SoftDelete(ctx context.Context, brandID, actorID, id int64) error
 

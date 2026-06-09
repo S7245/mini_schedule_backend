@@ -46,7 +46,7 @@ func (f *fakeStaffRepo) GetWithAssignments(_ context.Context, _, _ int64) (*staf
 func (f *fakeStaffRepo) List(_ context.Context, _ staff.ListFilter, _, _ int) ([]*staff.Staff, int64, error) {
 	return f.listItems, f.listTotal, nil
 }
-func (f *fakeStaffRepo) Update(_ context.Context, _, _ int64, _ staff.UpdateInput) (*staff.Staff, error) {
+func (f *fakeStaffRepo) Update(_ context.Context, _, _, _ int64, _ staff.UpdateInput) (*staff.Staff, error) {
 	return f.getAssign, f.updErr
 }
 func (f *fakeStaffRepo) UpdateStatus(_ context.Context, _, _, _ int64, _ staff.Status) (*staff.Staff, error) {

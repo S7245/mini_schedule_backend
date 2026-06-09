@@ -132,6 +132,7 @@ type updateStaffBody struct {
 
 func (h *StaffHandler) update(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
 	id, err := parseStaffID(c)
 	if err != nil {
 		response.Error(c, err)
@@ -142,7 +143,7 @@ func (h *StaffHandler) update(c *gin.Context) {
 		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
 		return
 	}
-	s, err := h.svc.Update(c.Request.Context(), brandID, id, staff.UpdateInput{Name: body.Name})
+	s, err := h.svc.Update(c.Request.Context(), brandID, actorID, id, staff.UpdateInput{Name: body.Name})
 	if err != nil {
 		response.Error(c, err)
 		return

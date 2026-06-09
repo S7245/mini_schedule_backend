@@ -87,8 +87,9 @@ func (r *instructorRepository) Upsert(ctx context.Context, actorID int64, in ins
 			}
 			if err := tx.Create(&saved).Error; err != nil {
 				if isUniqueViolation(err) {
-					// 走到这里通常意味着外部并发 insert；保持幂等返回 1:1 冲突
-					return apperr.NewAppError(apperr.ErrInstructorProfileNotFound, "教练档案冲突", 409)
+					// review B8：并发 insert 撞 unique index → 用 CONFLICT 语义错误码而非 NOT_FOUND，
+					// 否则前端会显示"教练档案不存在"，与实情（另一会话刚建好）矛盾。
+					return apperr.NewAppError(apperr.ErrInstructorProfileConflict, "教练档案已被其他会话建立，请刷新", 409)
 				}
 				return apperr.ErrInternalF("创建教练档案失败", err)
 			}
