@@ -32,8 +32,9 @@ type Staff struct {
 	IsOwner             bool                 `json:"is_owner"`
 	CreatedAt           time.Time            `json:"created_at"`
 	UpdatedAt           time.Time            `json:"updated_at"`
-	RoleAssignments     []RoleAssignment     `json:"role_assignments,omitempty"`
-	LocationAssignments []LocationAssignment `json:"location_assignments,omitempty"`
+	// 不用 omitempty：API 合约统一返数组（即便空），避免前端 .map() undefined 炸（owner 默认无 location）。
+	RoleAssignments     []RoleAssignment     `json:"role_assignments"`
+	LocationAssignments []LocationAssignment `json:"location_assignments"`
 	HasInstructor       bool                 `json:"has_instructor"`
 }
 

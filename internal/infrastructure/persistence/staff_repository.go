@@ -524,6 +524,13 @@ func (r *staffRepository) checkHasInstructor(ctx context.Context, brandID int64,
 }
 
 func toStaffDomain(m *brandUserWithOwnerModel, roles []staff.RoleAssignment, locs []staff.LocationAssignment, hasInstructor bool) *staff.Staff {
+	// nil slice → empty slice，确保 JSON 序列化为 `[]` 而不是被丢字段（前端 .map() 防御）。
+	if roles == nil {
+		roles = []staff.RoleAssignment{}
+	}
+	if locs == nil {
+		locs = []staff.LocationAssignment{}
+	}
 	return &staff.Staff{
 		ID:                  m.ID,
 		BrandID:             m.BrandID,
