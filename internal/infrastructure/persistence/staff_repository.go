@@ -1,0 +1,479 @@
+package persistence
+
+import (
+	"context"
+	"errors"
+	"strings"
+
+	"gorm.io/gorm"
+
+	"github.com/zkw/mini-schedule/backend/internal/audit"
+	"github.com/zkw/mini-schedule/backend/internal/domain/staff"
+	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
+)
+
+type staffRepository struct {
+	db *gorm.DB
+}
+
+// NewStaffRepository 创建 Staff 仓储。
+func NewStaffRepository(db *gorm.DB) staff.Repository {
+	return &staffRepository{db: db}
+}
+
+// brandUserWithOwnerModel 扩展 BrandUserModel 加 is_owner 列（migration 000005 已加）。
+type brandUserWithOwnerModel struct {
+	BrandUserModel
+	IsOwner bool `gorm:"column:is_owner"`
+}
+
+func (brandUserWithOwnerModel) TableName() string { return "brand_users" }
+
+// Create 用于 staff service：插入 brand_user + 标 is_owner=false + 写 audit。
+//
+// 角色 / location 分配在外层 staff service 拼装事务时调 ReplaceXxx，
+// 避免本方法 30+ 参数列表。
+func (r *staffRepository) Create(ctx context.Context, in staff.CreateInput) (*staff.Staff, error) {
+	var created brandUserWithOwnerModel
+
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		created = brandUserWithOwnerModel{
+			BrandUserModel: BrandUserModel{
+				BrandID:      in.BrandID,
+				Phone:        strings.TrimSpace(in.Phone),
+				PasswordHash: in.InitialPassword, // 调用方已 bcrypt
+				Name:         strings.TrimSpace(in.Name),
+				Status:       string(staff.StatusActive),
+			},
+			IsOwner: false,
+		}
+		if err := tx.Create(&created).Error; err != nil {
+			if isUniqueViolation(err) {
+				return apperr.NewAppError(apperr.ErrStaffPhoneDuplicated, "手机号已被占用", 409)
+			}
+			return apperr.ErrInternalF("创建员工失败", err)
+		}
+		bID := in.BrandID
+		return audit.Write(tx, audit.Event{
+			BrandID: &bID,
+			Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: in.ActorID},
+			Action:  "staff_created",
+			Target:  audit.Target{Type: "staff", ID: created.ID},
+			After:   &created,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.GetWithAssignments(ctx, in.BrandID, created.ID)
+}
+
+func (r *staffRepository) GetByID(ctx context.Context, brandID, id int64) (*staff.Staff, error) {
+	var m brandUserWithOwnerModel
+	if err := r.db.WithContext(ctx).
+		Where("id = ? AND brand_id = ? AND deleted_at IS NULL", id, brandID).
+		First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperr.NewAppError(apperr.ErrStaffNotFound, "员工不存在", 404)
+		}
+		return nil, apperr.ErrInternalF("查询员工失败", err)
+	}
+	return toStaffDomain(&m, nil, nil, false), nil
+}
+
+func (r *staffRepository) GetWithAssignments(ctx context.Context, brandID, id int64) (*staff.Staff, error) {
+	var m brandUserWithOwnerModel
+	if err := r.db.WithContext(ctx).
+		Where("id = ? AND brand_id = ? AND deleted_at IS NULL", id, brandID).
+		First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperr.NewAppError(apperr.ErrStaffNotFound, "员工不存在", 404)
+		}
+		return nil, apperr.ErrInternalF("查询员工失败", err)
+	}
+
+	roleAssignments, err := r.fetchRoleAssignments(ctx, brandID, []int64{id})
+	if err != nil {
+		return nil, err
+	}
+	locationAssignments, err := r.fetchLocationAssignments(ctx, brandID, []int64{id})
+	if err != nil {
+		return nil, err
+	}
+	hasInstructor, err := r.checkHasInstructor(ctx, brandID, []int64{id})
+	if err != nil {
+		return nil, err
+	}
+
+	return toStaffDomain(&m, roleAssignments[id], locationAssignments[id], hasInstructor[id]), nil
+}
+
+func (r *staffRepository) List(ctx context.Context, filter staff.ListFilter, offset, limit int) ([]*staff.Staff, int64, error) {
+	q := r.db.WithContext(ctx).
+		Model(&brandUserWithOwnerModel{}).
+		Where("brand_id = ? AND deleted_at IS NULL", filter.BrandID)
+	if filter.Status == string(staff.StatusActive) || filter.Status == string(staff.StatusInactive) {
+		q = q.Where("status = ?", filter.Status)
+	}
+	if filter.Search != "" {
+		s := "%" + strings.TrimSpace(filter.Search) + "%"
+		q = q.Where("name LIKE ? OR phone LIKE ?", s, s)
+	}
+
+	if filter.HasInstructor != nil {
+		// soft-delete JOIN 过滤：instructor_profiles 没有软删；brand_users 用主查询条件已过滤。
+		if *filter.HasInstructor {
+			q = q.Where("EXISTS (SELECT 1 FROM instructor_profiles ip WHERE ip.brand_user_id = brand_users.id AND ip.brand_id = ? AND ip.status = ?)", filter.BrandID, "active")
+		} else {
+			q = q.Where("NOT EXISTS (SELECT 1 FROM instructor_profiles ip WHERE ip.brand_user_id = brand_users.id AND ip.brand_id = ?)", filter.BrandID)
+		}
+	}
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, apperr.ErrInternalF("查询员工列表失败", err)
+	}
+
+	var rows []brandUserWithOwnerModel
+	if err := q.Order("id ASC").Offset(offset).Limit(limit).Find(&rows).Error; err != nil {
+		return nil, 0, apperr.ErrInternalF("查询员工列表失败", err)
+	}
+	if len(rows) == 0 {
+		return nil, total, nil
+	}
+
+	ids := make([]int64, 0, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].ID)
+	}
+	roleAssignments, err := r.fetchRoleAssignments(ctx, filter.BrandID, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	locationAssignments, err := r.fetchLocationAssignments(ctx, filter.BrandID, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	hasInstructor, err := r.checkHasInstructor(ctx, filter.BrandID, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	items := make([]*staff.Staff, 0, len(rows))
+	for i := range rows {
+		items = append(items, toStaffDomain(&rows[i], roleAssignments[rows[i].ID], locationAssignments[rows[i].ID], hasInstructor[rows[i].ID]))
+	}
+	return items, total, nil
+}
+
+func (r *staffRepository) Update(ctx context.Context, brandID, id int64, in staff.UpdateInput) (*staff.Staff, error) {
+	if err := r.db.WithContext(ctx).
+		Model(&brandUserWithOwnerModel{}).
+		Where("id = ? AND brand_id = ? AND deleted_at IS NULL", id, brandID).
+		Updates(buildStaffUpdates(in)).Error; err != nil {
+		return nil, apperr.ErrInternalF("更新员工失败", err)
+	}
+	return r.GetWithAssignments(ctx, brandID, id)
+}
+
+func buildStaffUpdates(in staff.UpdateInput) map[string]interface{} {
+	updates := map[string]interface{}{}
+	if in.Name != nil {
+		updates["name"] = strings.TrimSpace(*in.Name)
+	}
+	return updates
+}
+
+func (r *staffRepository) UpdateStatus(ctx context.Context, brandID, actorID, id int64, status staff.Status) (*staff.Staff, error) {
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var before brandUserWithOwnerModel
+		if err := tx.Where("id = ? AND brand_id = ? AND deleted_at IS NULL", id, brandID).First(&before).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrStaffNotFound, "员工不存在", 404)
+			}
+			return apperr.ErrInternalF("查询员工失败", err)
+		}
+		if before.Status == string(status) {
+			return nil
+		}
+		if err := tx.Model(&brandUserWithOwnerModel{}).
+			Where("id = ?", id).
+			Update("status", string(status)).Error; err != nil {
+			return apperr.ErrInternalF("更新员工状态失败", err)
+		}
+		after := before
+		after.Status = string(status)
+		bID := brandID
+		return audit.Write(tx, audit.Event{
+			BrandID: &bID,
+			Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: actorID},
+			Action:  "staff_status_changed",
+			Target:  audit.Target{Type: "staff", ID: id},
+			Before:  &before,
+			After:   &after,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.GetWithAssignments(ctx, brandID, id)
+}
+
+func (r *staffRepository) SoftDelete(ctx context.Context, brandID, actorID, id int64) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var before brandUserWithOwnerModel
+		if err := tx.Where("id = ? AND brand_id = ? AND deleted_at IS NULL", id, brandID).First(&before).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrStaffNotFound, "员工不存在", 404)
+			}
+			return apperr.ErrInternalF("查询员工失败", err)
+		}
+		res := tx.Where("id = ? AND brand_id = ?", id, brandID).Delete(&brandUserWithOwnerModel{})
+		if res.Error != nil {
+			return apperr.ErrInternalF("删除员工失败", res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return apperr.NewAppError(apperr.ErrStaffNotFound, "员工不存在", 404)
+		}
+		bID := brandID
+		return audit.Write(tx, audit.Event{
+			BrandID: &bID,
+			Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: actorID},
+			Action:  "staff_deleted",
+			Target:  audit.Target{Type: "staff", ID: id},
+			Before:  &before,
+		})
+	})
+}
+
+func (r *staffRepository) CountActiveOwners(ctx context.Context, brandID int64) (int64, error) {
+	var count int64
+	if err := r.db.WithContext(ctx).
+		Model(&brandUserWithOwnerModel{}).
+		Where("brand_id = ? AND is_owner = TRUE AND status = ? AND deleted_at IS NULL", brandID, "active").
+		Count(&count).Error; err != nil {
+		return 0, apperr.ErrInternalF("统计 Owner 数量失败", err)
+	}
+	return count, nil
+}
+
+func (r *staffRepository) ReplaceRoleAssignments(
+	ctx context.Context, brandID, actorID, brandUserID int64, items []staff.RoleAssignmentResolved,
+) ([]staff.RoleAssignment, error) {
+	var savedIDs []int64
+
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 单事务：拉 before（用于 audit）→ 全量 DELETE → INSERT 新 → 写 audit
+		var before []BrandUserRoleAssignmentModel
+		if err := tx.Where("brand_id = ? AND brand_user_id = ?", brandID, brandUserID).Find(&before).Error; err != nil {
+			return apperr.ErrInternalF("查询角色任职失败", err)
+		}
+		if err := tx.Where("brand_id = ? AND brand_user_id = ?", brandID, brandUserID).Delete(&BrandUserRoleAssignmentModel{}).Error; err != nil {
+			return apperr.ErrInternalF("清空角色任职失败", err)
+		}
+		for _, it := range items {
+			row := BrandUserRoleAssignmentModel{
+				BrandID:     brandID,
+				BrandUserID: brandUserID,
+				RoleID:      it.RoleID,
+				LocationID:  it.LocationID,
+				DataScope:   it.DataScope,
+				Status:      "active",
+			}
+			if err := tx.Create(&row).Error; err != nil {
+				return apperr.ErrInternalF("插入角色任职失败", err)
+			}
+			savedIDs = append(savedIDs, row.ID)
+		}
+		bID := brandID
+		return audit.Write(tx, audit.Event{
+			BrandID: &bID,
+			Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: actorID},
+			Action:  "staff_role_assignments_changed",
+			Target:  audit.Target{Type: "staff", ID: brandUserID},
+			Before:  before,
+			After:   items,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	bucket, err := r.fetchRoleAssignments(ctx, brandID, []int64{brandUserID})
+	if err != nil {
+		return nil, err
+	}
+	return bucket[brandUserID], nil
+}
+
+func (r *staffRepository) ReplaceLocationAssignments(
+	ctx context.Context, brandID, actorID, brandUserID int64, items []staff.LocationAssignmentInput,
+) ([]staff.LocationAssignment, error) {
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var before []StaffLocationAssignmentModel
+		if err := tx.Where("brand_id = ? AND brand_user_id = ?", brandID, brandUserID).Find(&before).Error; err != nil {
+			return apperr.ErrInternalF("查询 Location 任职失败", err)
+		}
+		if err := tx.Where("brand_id = ? AND brand_user_id = ?", brandID, brandUserID).Delete(&StaffLocationAssignmentModel{}).Error; err != nil {
+			return apperr.ErrInternalF("清空 Location 任职失败", err)
+		}
+		for _, it := range items {
+			// 校验 location_id 属于本 brand 且未软删
+			var loc LocationModel
+			if err := tx.Where("id = ? AND brand_id = ? AND deleted_at IS NULL", it.LocationID, brandID).First(&loc).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return apperr.NewAppError(apperr.ErrLocationAssignmentInvalid, "门店任职不合法", 400)
+				}
+				return apperr.ErrInternalF("校验门店失败", err)
+			}
+			row := StaffLocationAssignmentModel{
+				BrandID:        brandID,
+				BrandUserID:    brandUserID,
+				LocationID:     it.LocationID,
+				AssignmentType: it.AssignmentType,
+				IsPrimary:      it.IsPrimary,
+				Status:         "active",
+			}
+			if err := tx.Create(&row).Error; err != nil {
+				if isUniqueViolation(err) {
+					return apperr.NewAppError(apperr.ErrLocationAssignmentInvalid, "门店任职重复", 400)
+				}
+				return apperr.ErrInternalF("插入门店任职失败", err)
+			}
+		}
+		bID := brandID
+		return audit.Write(tx, audit.Event{
+			BrandID: &bID,
+			Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: actorID},
+			Action:  "staff_location_assignments_changed",
+			Target:  audit.Target{Type: "staff", ID: brandUserID},
+			Before:  before,
+			After:   items,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	bucket, err := r.fetchLocationAssignments(ctx, brandID, []int64{brandUserID})
+	if err != nil {
+		return nil, err
+	}
+	return bucket[brandUserID], nil
+}
+
+// fetchRoleAssignments 一次拉一批 brand_user 的角色任职，按 brand_user_id 聚合。
+// 注意：JOIN brand_roles 拿 code/name/scope_type；JOIN brand_users 加 deleted_at IS NULL 过滤。
+func (r *staffRepository) fetchRoleAssignments(ctx context.Context, brandID int64, ids []int64) (map[int64][]staff.RoleAssignment, error) {
+	if len(ids) == 0 {
+		return map[int64][]staff.RoleAssignment{}, nil
+	}
+	type row struct {
+		ID          int64
+		BrandUserID int64
+		RoleID      int64
+		Code        string
+		Name        string
+		ScopeType   string
+		LocationID  *int64
+		DataScope   string
+		Status      string
+	}
+	var rows []row
+	if err := r.db.WithContext(ctx).
+		Table("brand_user_role_assignments AS a").
+		Select("a.id, a.brand_user_id, a.role_id, br.code, br.name, br.scope_type, a.location_id, a.data_scope, a.status").
+		Joins("JOIN brand_roles br ON br.id = a.role_id").
+		Joins("JOIN brand_users bu ON bu.id = a.brand_user_id").
+		Where("a.brand_id = ? AND a.brand_user_id IN ? AND bu.deleted_at IS NULL", brandID, ids).
+		Scan(&rows).Error; err != nil {
+		return nil, apperr.ErrInternalF("查询角色任职失败", err)
+	}
+	out := make(map[int64][]staff.RoleAssignment, len(ids))
+	for _, r := range rows {
+		out[r.BrandUserID] = append(out[r.BrandUserID], staff.RoleAssignment{
+			ID:         r.ID,
+			RoleID:     r.RoleID,
+			RoleCode:   r.Code,
+			RoleName:   r.Name,
+			ScopeType:  r.ScopeType,
+			LocationID: r.LocationID,
+			DataScope:  r.DataScope,
+			Status:     r.Status,
+		})
+	}
+	return out, nil
+}
+
+func (r *staffRepository) fetchLocationAssignments(ctx context.Context, brandID int64, ids []int64) (map[int64][]staff.LocationAssignment, error) {
+	if len(ids) == 0 {
+		return map[int64][]staff.LocationAssignment{}, nil
+	}
+	type row struct {
+		ID             int64
+		BrandUserID    int64
+		LocationID     int64
+		LocationName   string
+		AssignmentType string
+		IsPrimary      bool
+		Status         string
+	}
+	var rows []row
+	if err := r.db.WithContext(ctx).
+		Table("staff_location_assignments AS a").
+		Select("a.id, a.brand_user_id, a.location_id, l.name AS location_name, a.assignment_type, a.is_primary, a.status").
+		Joins("JOIN locations l ON l.id = a.location_id").
+		Joins("JOIN brand_users bu ON bu.id = a.brand_user_id").
+		Where("a.brand_id = ? AND a.brand_user_id IN ? AND bu.deleted_at IS NULL AND l.deleted_at IS NULL", brandID, ids).
+		Scan(&rows).Error; err != nil {
+		return nil, apperr.ErrInternalF("查询门店任职失败", err)
+	}
+	out := make(map[int64][]staff.LocationAssignment, len(ids))
+	for _, r := range rows {
+		out[r.BrandUserID] = append(out[r.BrandUserID], staff.LocationAssignment{
+			ID:             r.ID,
+			LocationID:     r.LocationID,
+			LocationName:   r.LocationName,
+			AssignmentType: r.AssignmentType,
+			IsPrimary:      r.IsPrimary,
+			Status:         r.Status,
+		})
+	}
+	return out, nil
+}
+
+func (r *staffRepository) checkHasInstructor(ctx context.Context, brandID int64, ids []int64) (map[int64]bool, error) {
+	out := map[int64]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	type row struct{ BrandUserID int64 }
+	var rows []row
+	if err := r.db.WithContext(ctx).
+		Table("instructor_profiles").
+		Select("brand_user_id").
+		Where("brand_id = ? AND brand_user_id IN ?", brandID, ids).
+		Scan(&rows).Error; err != nil {
+		return nil, apperr.ErrInternalF("查询教练标识失败", err)
+	}
+	for _, r := range rows {
+		out[r.BrandUserID] = true
+	}
+	return out, nil
+}
+
+func toStaffDomain(m *brandUserWithOwnerModel, roles []staff.RoleAssignment, locs []staff.LocationAssignment, hasInstructor bool) *staff.Staff {
+	return &staff.Staff{
+		ID:                  m.ID,
+		BrandID:             m.BrandID,
+		Phone:               m.Phone,
+		Name:                m.Name,
+		Status:              staff.Status(m.Status),
+		IsOwner:             m.IsOwner,
+		CreatedAt:           m.CreatedAt,
+		UpdatedAt:           m.UpdatedAt,
+		RoleAssignments:     roles,
+		LocationAssignments: locs,
+		HasInstructor:       hasInstructor,
+	}
+}
