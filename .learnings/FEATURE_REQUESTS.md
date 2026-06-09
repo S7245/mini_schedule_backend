@@ -25,3 +25,19 @@
 ## 2026-06-06 Batch 4 → Batch 5 起飞前必做
 
 - ~~**migration 自动化 / schema drift 防御**~~：✅ Batch 4.5 已落地（commit `13bdcd2..696d02d`）。auto-apply on boot + Makefile DSN fallback 都已上线。CI 真 PG 跑测试仍未做，但 boot-time 已足够覆盖本地开发主线场景。
+## 2026-06-06 Batch 5 code-review 转移项
+
+7 项 P1/P2 在 Batch 5 当批合入（commits `9cd2807` backend / `36bd170` frontend）；以下转下批清债。
+
+- **B1 service.Create 原子性**：staff_repository.Create / ReplaceRoleAssignments / ReplaceLocationAssignments 当前是 3 个独立事务，第 2/3 步失败留下孤儿 staff 占 seat quota（E36 配额回滚不一致）。需要在 staffRepository 加 `CreateWithAssignments(ctx, brandID, actorID, in, roleAssignments, locationAssignments)` 单事务方法。
+- **B6 OwnerRoleAllocator 接口加 ctx**：`role_allocator.AssignDefaultOwnerRolesTx` 现在用 `context.Background()`，丢失 HTTP 请求的 cancellation / deadline / trace。接口需要破坏性改成 `AssignDefaultOwnerRolesTx(ctx context.Context, tx any, brandID, brandUserID int64)`，commercial.Service 注册流程 + admin backfill 各传一份 ctx。
+- **B7 providePublicHandler 真重构**：`cmd/api-brand/wire_gen.go:81` 的 `admin.NewHandler(nil, commercialSvc, nil, nil, nil)` 现在 4 个 nil（Batch 5 加了 SystemHandler 后 +1）。Batch 4 FR 已列过，本批又加深一层。彻底方案：抽 `internal/interfaces/public/handler.go` 把 RegisterSaaSPlanRoutes / RegisterPublicRoutes 等真公开接口搬过去，admin Handler 不再被 brand 进程复用。
+- **B12 主门店单选 invariant 客户端化**：`staff-create-dialog.tsx` 的 `primaries <= 1` schema 没有强制 "assignments 非空时必须正好 1 primary"；服务端会以 LOCATION_ASSIGNMENT_INVALID 兜底但 UX 不直观。RoleAssignmentEditor 同款问题（参考 backend correctness finder #3）。
+- **B13 scope-aware location 在 create dialog 缺失**：StaffCreateDialog 现在只问 role_codes 多选 + location_assignments 多行，没在客户端先判断"选了 location-scope 角色但没填 location_assignment"。RoleAssignmentEditor 有，create dialog 没有。
+- **B14 ResourceStatusToggle 泛型抽出**：StaffStatusToggle 是 LocationStatusToggle 的几乎逐行复制；Learner / Course 一定会再来一份。建议抽 `<ResourceStatusToggle<T extends {id, status, name}> mutation={...} ownerLocked={...} />` 把 mutation hook + error code 映射当 props 传进去。
+- **B15 instructor_repository action 区分 created/updated**：`instructor_profile_upserted` 硬编码，BI / 合规报表 SQL filter 写起来啰嗦。before==nil 时记 `instructor_profile_created`，否则 `_updated`。
+- **B16 staff_seats COUNT 是否过滤 status='active'**：当前 SubscriptionGuard 数 brand_users 不过滤 status，inactive 也占席位（与 Location 同款"防 disable→腾位 hack"）。前端"停用员工"按钮可能让用户误以为腾位置；需要产品决定意图后再调整 COUNT 或加文案。
+- **B17 audit.Write BrandID==&0 兜底**：audit pkg 接受 `*int64` BrandID，零值指针会被写入 brand_id=0 行；建议加 `if e.BrandID != nil && *e.BrandID > 0` 守卫。
+- **B18 staff_repository.List HasInstructor 分支不对称**：true 分支用 `status='active'`，false 分支用 NOT EXISTS 不限 status。inactive instructor 在两边都漏。统一过滤策略。
+- **B19 AssignDefaultOwnerRoles ON CONFLICT 部分索引盲点**：唯一索引 WHERE status='active' AND location_id IS NULL；如果存在历史 status='inactive' 的 brand_owner 关联，ON CONFLICT 不命中会重复插入。改 `INSERT ... WHERE NOT EXISTS` 或先 UPDATE 拉起再 INSERT。
+- **B-delete-condition 扩展**：详情页删除按钮 disabled 条件目前只看 `is_owner`；后端将来扩 OWNER_PROTECTED 触发条件（如"最后一个 admin"）时 UI 不会预禁用，按钮可点 → 失败 toast。建议让后端先返回一个 `can_delete: false, reason: 'last_admin'` 字段，前端按它渲染 tooltip。
