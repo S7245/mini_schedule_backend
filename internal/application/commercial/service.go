@@ -17,11 +17,22 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// OwnerRoleAllocator 抽象品牌负责人角色分配（避免环：application/commercial → application/staff）。
+// 实际实现是 staff.RoleAllocator，注入方式：
+//
+//	commercial.Service.SetOwnerRoleAllocator(allocator)
+//
+// 在 brand 进程 main / wire 完成 Service 构造后调用。
+type OwnerRoleAllocator interface {
+	AssignDefaultOwnerRolesTx(tx any, brandID, brandUserID int64) error
+}
+
 type Service struct {
 	repo          commercial.Repository
 	cfg           *config.Config
 	redis         *redis.Client
 	wechatAdapter *payment.WeChatPaymentAdapter
+	ownerRoles    OwnerRoleAllocator
 }
 
 func NewService(
@@ -36,6 +47,12 @@ func NewService(
 		redis:         redisClient,
 		wechatAdapter: wechatAdapter,
 	}
+}
+
+// SetOwnerRoleAllocator 注入"分配 brand_owner 角色"实现；通常在 wire 之后调用。
+// nil 时注册流程不会试图分配角色（兼容历史/测试）。
+func (s *Service) SetOwnerRoleAllocator(a OwnerRoleAllocator) {
+	s.ownerRoles = a
 }
 
 func (s *Service) CreateSaaSPlan(ctx context.Context, input commercial.CreateSaaSPlanInput) (*commercial.SaaSPlan, error) {
@@ -116,7 +133,7 @@ func (s *Service) CreatePublicSignupOrder(ctx context.Context, input commercial.
 		return nil, apperr.ErrInternalF("生成订单号失败", err)
 	}
 
-	return s.repo.CreatePublicSignupOrder(ctx, commercial.CreatePublicSignupOrderRecordInput{
+	rec := commercial.CreatePublicSignupOrderRecordInput{
 		Phone:          input.Phone,
 		PasswordHash:   string(hashedPassword),
 		BrandName:      input.BrandName,
@@ -128,7 +145,14 @@ func (s *Service) CreatePublicSignupOrder(ctx context.Context, input commercial.
 		BillingCycle:   input.BillingCycle,
 		PaymentChannel: input.PaymentChannel,
 		OutTradeNo:     outTradeNo,
-	})
+	}
+	// Batch 5: 注册流程改造——brand_user INSERT 后同事务分配 brand_owner 角色。
+	if s.ownerRoles != nil {
+		rec.OnBrandUserCreated = func(tx commercial.PostInsertTx, brandID, brandUserID int64) error {
+			return s.ownerRoles.AssignDefaultOwnerRolesTx(tx, brandID, brandUserID)
+		}
+	}
+	return s.repo.CreatePublicSignupOrder(ctx, rec)
 }
 
 func (s *Service) UpdateSaaSPlan(ctx context.Context, id int64, input commercial.UpdateSaaSPlanInput) (*commercial.SaaSPlan, error) {

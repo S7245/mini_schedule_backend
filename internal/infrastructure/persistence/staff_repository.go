@@ -7,18 +7,20 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/audit"
 	"github.com/zkw/mini-schedule/backend/internal/domain/staff"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
 
 type staffRepository struct {
-	db *gorm.DB
+	db    *gorm.DB
+	guard *commercial.SubscriptionGuard
 }
 
-// NewStaffRepository 创建 Staff 仓储。
-func NewStaffRepository(db *gorm.DB) staff.Repository {
-	return &staffRepository{db: db}
+// NewStaffRepository 创建 Staff 仓储；guard 在 Create 内事务里做 seats quota。
+func NewStaffRepository(db *gorm.DB, guard *commercial.SubscriptionGuard) staff.Repository {
+	return &staffRepository{db: db, guard: guard}
 }
 
 // brandUserWithOwnerModel 扩展 BrandUserModel 加 is_owner 列（migration 000005 已加）。
@@ -37,6 +39,11 @@ func (r *staffRepository) Create(ctx context.Context, in staff.CreateInput) (*st
 	var created brandUserWithOwnerModel
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 1) Subscription quota：lock active sub + COUNT brand_users + compare max_staff_seats
+		if _, _, err := r.guard.CheckAndCount(ctx, tx, in.BrandID, commercial.ResourceStaff); err != nil {
+			return err
+		}
+
 		created = brandUserWithOwnerModel{
 			BrandUserModel: BrandUserModel{
 				BrandID:      in.BrandID,

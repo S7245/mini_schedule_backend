@@ -69,7 +69,14 @@ type CreatePublicSignupOrderRecordInput struct {
 	BillingCycle   BillingCycle
 	PaymentChannel PaymentChannel
 	OutTradeNo     string
+	// OnBrandUserCreated 在 brand_user 已 INSERT 但事务尚未 commit 时调用，用于由
+	// application 层注入"分配品牌负责人角色"等横切动作。tx 参数即当前事务。
+	OnBrandUserCreated func(tx PostInsertTx, brandID, brandUserID int64) error
 }
+
+// PostInsertTx 是事务回调接收的最小 GORM 抽象，避免 domain 直接依赖 gorm 包。
+// 实现方就是 *gorm.DB。
+type PostInsertTx interface{}
 
 type PublicSignupOrderResult struct {
 	BrandID         int64          `json:"brand_id"`

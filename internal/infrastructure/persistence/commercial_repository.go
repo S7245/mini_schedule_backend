@@ -233,6 +233,13 @@ func (r *commercialRepository) CreatePublicSignupOrder(ctx context.Context, inpu
 			return apperr.ErrInternalF("标记品牌负责人失败", err)
 		}
 
+		// Batch 5: application 注入"分配 brand_owner 角色"等动作。
+		if input.OnBrandUserCreated != nil {
+			if err := input.OnBrandUserCreated(tx, brandModel.ID, brandUserModel.ID); err != nil {
+				return err
+			}
+		}
+
 		orderModel := SaaSPlanOrderModel{
 			BrandID:        brandModel.ID,
 			BrandUserID:    &brandUserModel.ID,

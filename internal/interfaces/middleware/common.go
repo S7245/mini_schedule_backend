@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
+	"github.com/zkw/mini-schedule/backend/pkg/i18n"
 	"github.com/zkw/mini-schedule/backend/pkg/response"
 )
 
@@ -41,6 +42,15 @@ func CORS(cfg config.CORSConfig) gin.HandlerFunc {
 			return
 		}
 
+		c.Next()
+	}
+}
+
+// Locale 识别请求语言并写入 Content-Language 响应头
+func Locale() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		locale := i18n.FromRequest(c.Request)
+		c.Header("Content-Language", string(locale))
 		c.Next()
 	}
 }

@@ -5,25 +5,24 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-playground/validator/v10"
-
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
-	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
-	domainuser "github.com/zkw/mini-schedule/backend/internal/domain/user"
 	trainingdomain "github.com/zkw/mini-schedule/backend/internal/domain/training"
+	domainuser "github.com/zkw/mini-schedule/backend/internal/domain/user"
+	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 	"github.com/zkw/mini-schedule/backend/pkg/response"
+	"github.com/zkw/mini-schedule/backend/pkg/validation"
 )
 
 // Handler C 端用户 Handler
 type Handler struct {
-	appUserSvc   *user.AppUserService
-	courseSvc    *course.Service
-	trainingSvc  *training.Service
-	jwtSvc       *cache.Service
-	validator    *validator.Validate
+	appUserSvc  *user.AppUserService
+	courseSvc   *course.Service
+	trainingSvc *training.Service
+	jwtSvc      *cache.Service
+	validator   *validation.Validator
 }
 
 // NewHandler 创建 C 端 Handler
@@ -38,7 +37,7 @@ func NewHandler(
 		courseSvc:   courseSvc,
 		trainingSvc: trainingSvc,
 		jwtSvc:      jwtSvc,
-		validator:   validator.New(),
+		validator:   validation.New(),
 	}
 }
 
@@ -76,10 +75,10 @@ type WechatLoginRequest struct {
 
 // WechatLoginResponse 微信登录响应
 type WechatLoginResponse struct {
-	AccessToken  string          `json:"access_token"`
-	RefreshToken string          `json:"refresh_token"`
-	User         *AppUserInfo    `json:"user"`
-	IsNewUser    bool            `json:"is_new_user"`
+	AccessToken  string       `json:"access_token"`
+	RefreshToken string       `json:"refresh_token"`
+	User         *AppUserInfo `json:"user"`
+	IsNewUser    bool         `json:"is_new_user"`
 }
 
 // AppUserInfo C 端用户信息
@@ -99,7 +98,7 @@ func (h *Handler) wechatLogin(c *gin.Context) {
 	}
 
 	if err := h.validator.Struct(req); err != nil {
-		response.Error(c, response.ErrInvalidRequest(err.Error()))
+		response.Error(c, h.validator.InvalidRequest(c, err))
 		return
 	}
 
@@ -185,7 +184,7 @@ func (h *Handler) updateProfile(c *gin.Context) {
 	}
 
 	if err := h.validator.Struct(req); err != nil {
-		response.Error(c, response.ErrInvalidRequest(err.Error()))
+		response.Error(c, h.validator.InvalidRequest(c, err))
 		return
 	}
 
@@ -249,7 +248,7 @@ func (h *Handler) createTraining(c *gin.Context) {
 	}
 
 	if err := h.validator.Struct(req); err != nil {
-		response.Error(c, response.ErrInvalidRequest(err.Error()))
+		response.Error(c, h.validator.InvalidRequest(c, err))
 		return
 	}
 
