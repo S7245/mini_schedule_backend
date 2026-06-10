@@ -36,6 +36,9 @@ type Handler struct {
 
 	// Batch 5
 	staff *StaffHandler
+
+	// Batch 6
+	me *MeHandler
 }
 
 // NewHandler 创建品牌 Handler
@@ -50,6 +53,7 @@ func NewHandler(
 	profile *ProfileHandler,
 	location *LocationHandler,
 	staff *StaffHandler,
+	me *MeHandler,
 ) *Handler {
 	return &Handler{
 		brandSvc:     brandSvc,
@@ -63,6 +67,7 @@ func NewHandler(
 		profile:      profile,
 		location:     location,
 		staff:        staff,
+		me:           me,
 	}
 }
 
@@ -106,6 +111,9 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		}
 		if h.staff != nil {
 			h.staff.RegisterRoutes(auth)
+		}
+		if h.me != nil {
+			h.me.RegisterRoutes(auth)
 		}
 	}
 }

@@ -17,7 +17,9 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
 	appLocation "github.com/zkw/mini-schedule/backend/internal/application/location"
 	appOnboarding "github.com/zkw/mini-schedule/backend/internal/application/onboarding"
+	"github.com/zkw/mini-schedule/backend/internal/application/rbac"
 	appStaff "github.com/zkw/mini-schedule/backend/internal/application/staff"
+	domainrbac "github.com/zkw/mini-schedule/backend/internal/domain/rbac"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
@@ -28,6 +30,12 @@ import (
 	brandHandler "github.com/zkw/mini-schedule/backend/internal/interfaces/brand"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 )
+
+// provideRBACChecker 把 Redis client 包成 cacheStore + 注入 log，给 *rbac.Checker。
+// 各 service 的本地 PermissionChecker 接口在 wire.Build 里通过 wire.Bind 桥接到这一个 *rbac.Checker。
+func provideRBACChecker(repo domainrbac.Repository, redisClient *redis.Client, log *slog.Logger) (*rbac.Checker, error) {
+	return rbac.NewChecker(repo, rbac.NewRedisCacheStore(redisClient), log)
+}
 
 // providePublicHandler 在 brand 进程内复用 admin.Handler 的 RegisterPublicRoutes。
 //
@@ -79,6 +87,14 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewStaffRepository,
 		persistence.NewRoleRepository,
 		persistence.NewInstructorRepository,
+		persistence.NewRBACRepository,
+
+		// Batch 6 — RBAC checker + 4 个 service 的本地 PermissionChecker 接口绑定
+		provideRBACChecker,
+		wire.Bind(new(appStaff.PermissionChecker), new(*rbac.Checker)),
+		wire.Bind(new(appLocation.PermissionChecker), new(*rbac.Checker)),
+		wire.Bind(new(appOnboarding.PermissionChecker), new(*rbac.Checker)),
+		wire.Bind(new(brandprofile.PermissionChecker), new(*rbac.Checker)),
 
 		// 应用服务
 		brand.NewService,
@@ -100,6 +116,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		brandHandler.NewProfileHandler,
 		brandHandler.NewLocationHandler,
 		brandHandler.NewStaffHandler,
+		brandHandler.NewMeHandler,
 		providePublicHandler,
 
 		// 路由

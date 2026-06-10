@@ -15,9 +15,11 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
 	"github.com/zkw/mini-schedule/backend/internal/application/location"
 	"github.com/zkw/mini-schedule/backend/internal/application/onboarding"
+	rbac2 "github.com/zkw/mini-schedule/backend/internal/application/rbac"
 	"github.com/zkw/mini-schedule/backend/internal/application/staff"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
+	"github.com/zkw/mini-schedule/backend/internal/domain/rbac"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/payment"
@@ -55,27 +57,33 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	trainingRepository := persistence.NewTrainingRepository(db)
 	trainingService := training.NewService(trainingRepository, cfg)
 	onboardingRepository := persistence.NewOnboardingRepository(db)
-	onboardingService := onboarding.NewService(onboardingRepository)
-	onboardingHandler := brand2.NewOnboardingHandler(onboardingService)
-	brandProfileRepository := persistence.NewBrandProfileRepository(db)
-	brandprofileService := brandprofile.NewService(brandProfileRepository)
-	profileHandler := brand2.NewProfileHandler(brandprofileService)
-	subscriptionGuard := commercial.NewSubscriptionGuard()
-	locationRepository := persistence.NewLocationRepository(db, subscriptionGuard)
-	locationService := location.NewService(locationRepository, nil)
-	locationHandler := brand2.NewLocationHandler(locationService)
-	staffRepository := persistence.NewStaffRepository(db, subscriptionGuard)
-	roleRepository := persistence.NewRoleRepository(db)
-	instructorRepository := persistence.NewInstructorRepository(db)
-	staffService := staff.NewService(staffRepository, roleRepository, instructorRepository, nil)
-	staffHandler := brand2.NewStaffHandler(staffService)
-	handler := brand2.NewHandler(service, brandUserService, appUserService, courseService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler, staffHandler)
-	commercialRepository := persistence.NewCommercialRepository(db)
+	rbacRepository := persistence.NewRBACRepository(db)
 	redisConfig := provideRedisConfig(cfg)
 	client, err := cache.NewRedisClient(redisConfig, log)
 	if err != nil {
 		return nil, nil, err
 	}
+	checker, err := provideRBACChecker(rbacRepository, client, log)
+	if err != nil {
+		return nil, nil, err
+	}
+	onboardingService := onboarding.NewService(onboardingRepository, checker)
+	onboardingHandler := brand2.NewOnboardingHandler(onboardingService)
+	brandProfileRepository := persistence.NewBrandProfileRepository(db)
+	brandprofileService := brandprofile.NewService(brandProfileRepository, checker)
+	profileHandler := brand2.NewProfileHandler(brandprofileService)
+	subscriptionGuard := commercial.NewSubscriptionGuard()
+	locationRepository := persistence.NewLocationRepository(db, subscriptionGuard)
+	locationService := location.NewService(locationRepository, checker)
+	locationHandler := brand2.NewLocationHandler(locationService)
+	staffRepository := persistence.NewStaffRepository(db, subscriptionGuard)
+	roleRepository := persistence.NewRoleRepository(db)
+	instructorRepository := persistence.NewInstructorRepository(db)
+	staffService := staff.NewService(staffRepository, roleRepository, instructorRepository, checker)
+	staffHandler := brand2.NewStaffHandler(staffService)
+	meHandler := brand2.NewMeHandler(checker)
+	handler := brand2.NewHandler(service, brandUserService, appUserService, courseService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler, staffHandler, meHandler)
+	commercialRepository := persistence.NewCommercialRepository(db)
 	weChatPaymentAdapter := payment.NewWeChatPaymentAdapter(cfg)
 	commercialService := commercial.NewService(commercialRepository, cfg, client, weChatPaymentAdapter)
 	adminHandler := providePublicHandler(commercialService)
@@ -86,6 +94,12 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 }
 
 // wire.go:
+
+// provideRBACChecker 把 Redis client 包成 cacheStore + 注入 log，给 *rbac.Checker。
+// 各 service 的本地 PermissionChecker 接口在 wire.Build 里通过 wire.Bind 桥接到这一个 *rbac.Checker。
+func provideRBACChecker(repo rbac.Repository, redisClient *redis.Client, log *slog.Logger) (*rbac2.Checker, error) {
+	return rbac2.NewChecker(repo, rbac2.NewRedisCacheStore(redisClient), log)
+}
 
 // providePublicHandler 在 brand 进程内复用 admin.Handler 的 RegisterPublicRoutes。
 //
