@@ -6,6 +6,7 @@ import (
 	"time"
 
 	domainonboarding "github.com/zkw/mini-schedule/backend/internal/domain/onboarding"
+	domainrbac "github.com/zkw/mini-schedule/backend/internal/domain/rbac"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
 
@@ -87,7 +88,7 @@ func TestGetOnboardingStatus_BrandNotActive(t *testing.T) {
 	repo := &fakeRepo{
 		summary: &domainonboarding.BrandSummary{ID: 1, Status: "pending"},
 	}
-	svc := NewService(repo)
+	svc := NewService(repo, nil)
 	_, err := svc.GetOnboardingStatus(context.Background(), 1)
 	if err == nil {
 		t.Fatal("expected error for pending brand")
@@ -102,7 +103,7 @@ func TestGetOnboardingStatus_AllNotStarted(t *testing.T) {
 		summary: newActiveSummary(),
 		counts:  &domainonboarding.CountsByStep{},
 	}
-	svc := NewService(repo)
+	svc := NewService(repo, nil)
 	st, err := svc.GetOnboardingStatus(context.Background(), 1)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +133,7 @@ func TestGetOnboardingStatus_BrandProfileCompletedByContent(t *testing.T) {
 		},
 		counts: &domainonboarding.CountsByStep{Location: 1},
 	}
-	svc := NewService(repo)
+	svc := NewService(repo, nil)
 	st, err := svc.GetOnboardingStatus(context.Background(), 1)
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +155,7 @@ func TestGetOnboardingStatus_StaffRequiresBothCounts(t *testing.T) {
 		summary: newActiveSummary(),
 		counts:  &domainonboarding.CountsByStep{Staff: 2, InstructorProfile: 0},
 	}
-	svc := NewService(repo)
+	svc := NewService(repo, nil)
 	st, _ := svc.GetOnboardingStatus(context.Background(), 1)
 	// staff should NOT be completed
 	if st.Steps[2].Status == domainonboarding.StepStatusCompleted {
@@ -171,7 +172,7 @@ func TestGetOnboardingStatus_SkippedPrevails(t *testing.T) {
 			{StepKey: domainonboarding.StepStaff, Status: domainonboarding.StepStatusSkipped, SkippedAt: &now},
 		},
 	}
-	svc := NewService(repo)
+	svc := NewService(repo, nil)
 	st, _ := svc.GetOnboardingStatus(context.Background(), 1)
 	if st.Steps[2].Status != domainonboarding.StepStatusSkipped {
 		t.Errorf("staff should reflect skipped, got %s", st.Steps[2].Status)
@@ -180,9 +181,9 @@ func TestGetOnboardingStatus_SkippedPrevails(t *testing.T) {
 
 func TestSkipStep_BlocksMandatorySteps(t *testing.T) {
 	repo := &fakeRepo{summary: newActiveSummary()}
-	svc := NewService(repo)
+	svc := NewService(repo, nil)
 	for _, k := range []string{"brand_profile", "location"} {
-		_, err := svc.SkipStep(context.Background(), 1, k, "")
+		_, err := svc.SkipStep(context.Background(), 1, 0, k, "")
 		if err == nil {
 			t.Errorf("expected error skipping %s", k)
 			continue
@@ -196,8 +197,8 @@ func TestSkipStep_BlocksMandatorySteps(t *testing.T) {
 
 func TestSkipStep_InvalidKey(t *testing.T) {
 	repo := &fakeRepo{summary: newActiveSummary()}
-	svc := NewService(repo)
-	_, err := svc.SkipStep(context.Background(), 1, "foo", "")
+	svc := NewService(repo, nil)
+	_, err := svc.SkipStep(context.Background(), 1, 0, "foo", "")
 	if err == nil {
 		t.Fatal("expected error for unknown key")
 	}
@@ -208,8 +209,8 @@ func TestSkipStep_InvalidKey(t *testing.T) {
 
 func TestSkipStep_HappyPath(t *testing.T) {
 	repo := &fakeRepo{summary: newActiveSummary()}
-	svc := NewService(repo)
-	rec, err := svc.SkipStep(context.Background(), 1, "staff", "not now")
+	svc := NewService(repo, nil)
+	rec, err := svc.SkipStep(context.Background(), 1, 0, "staff", "not now")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,8 +230,8 @@ func TestComplete_NotReady(t *testing.T) {
 		summary: newActiveSummary(),
 		counts:  &domainonboarding.CountsByStep{},
 	}
-	svc := NewService(repo)
-	_, err := svc.Complete(context.Background(), 1)
+	svc := NewService(repo, nil)
+	_, err := svc.Complete(context.Background(), 1, 0)
 	if err == nil {
 		t.Fatal("expected error when steps incomplete")
 	}
@@ -263,8 +264,8 @@ func TestComplete_AllSkippedOrDone(t *testing.T) {
 		counts: &domainonboarding.CountsByStep{Location: 1},
 		steps:  steps,
 	}
-	svc := NewService(repo)
-	st, err := svc.Complete(context.Background(), 1)
+	svc := NewService(repo, nil)
+	st, err := svc.Complete(context.Background(), 1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,8 +292,8 @@ func TestComplete_Idempotent(t *testing.T) {
 		},
 		counts: &domainonboarding.CountsByStep{Location: 1},
 	}
-	svc := NewService(repo)
-	st, err := svc.Complete(context.Background(), 1)
+	svc := NewService(repo, nil)
+	st, err := svc.Complete(context.Background(), 1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,5 +302,63 @@ func TestComplete_Idempotent(t *testing.T) {
 	}
 	if repo.markedAt != nil {
 		t.Errorf("idempotent path should not re-mark complete")
+	}
+}
+
+// ---- Batch 6: RequirePermission gates ----
+
+type fakeChecker struct {
+	requireErrs map[string]error
+}
+
+func (f *fakeChecker) Require(_ context.Context, _, _ int64, code string) error {
+	if f.requireErrs == nil {
+		return nil
+	}
+	if err, ok := f.requireErrs[code]; ok {
+		return err
+	}
+	return nil
+}
+
+func (f *fakeChecker) Resolve(_ context.Context, _, _ int64) (domainrbac.PermissionSet, domainrbac.DataScope, error) {
+	return nil, domainrbac.DataScope{}, nil
+}
+
+func deniedErr(code string) error {
+	return apperr.NewAppError(apperr.ErrPermissionDenied, "权限不足", 403).
+		WithDetails(map[string]any{"required": code, "missing": []string{code}})
+}
+
+// E8 — 张三 PATCH /onboarding/steps/staff/skip 没有 brand.profile.edit
+func TestSkipStep_PermissionDenied(t *testing.T) {
+	repo := &fakeRepo{summary: &domainonboarding.BrandSummary{Status: "active"}}
+	ch := &fakeChecker{requireErrs: map[string]error{"brand.profile.edit": deniedErr("brand.profile.edit")}}
+	svc := NewService(repo, ch)
+	_, err := svc.SkipStep(context.Background(), 1, 18, "staff", "")
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+// E7 — 张三 POST /onboarding/complete 没有 brand.profile.edit
+func TestComplete_PermissionDenied(t *testing.T) {
+	repo := &fakeRepo{summary: &domainonboarding.BrandSummary{Status: "active"}}
+	ch := &fakeChecker{requireErrs: map[string]error{"brand.profile.edit": deniedErr("brand.profile.edit")}}
+	svc := NewService(repo, ch)
+	_, err := svc.Complete(context.Background(), 1, 18)
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
+		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+// E17 — GET /onboarding/status 不需要权限（自服务接口）
+func TestGetOnboardingStatus_NoPermissionRequired(t *testing.T) {
+	repo := &fakeRepo{summary: newActiveSummary(), counts: &domainonboarding.CountsByStep{}}
+	// 即便 checker.Require 永远拒，也不影响 status 读取
+	ch := &fakeChecker{requireErrs: map[string]error{"brand.profile.view": deniedErr("brand.profile.view")}}
+	svc := NewService(repo, ch)
+	if _, err := svc.GetOnboardingStatus(context.Background(), 1); err != nil {
+		t.Fatalf("status should never require permission, got %v", err)
 	}
 }

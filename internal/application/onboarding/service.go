@@ -6,17 +6,32 @@ import (
 	"time"
 
 	domainonboarding "github.com/zkw/mini-schedule/backend/internal/domain/onboarding"
+	domainrbac "github.com/zkw/mini-schedule/backend/internal/domain/rbac"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
 
-// Service onboarding 应用服务，编排 GET status / Skip / Complete。
-type Service struct {
-	repo domainonboarding.Repository
+// PermissionChecker 最小化接口。
+type PermissionChecker interface {
+	Require(ctx context.Context, brandID, brandUserID int64, code string) error
+	Resolve(ctx context.Context, brandID, brandUserID int64) (domainrbac.PermissionSet, domainrbac.DataScope, error)
 }
 
-// NewService 创建 onboarding 应用服务。
-func NewService(repo domainonboarding.Repository) *Service {
-	return &Service{repo: repo}
+// Service onboarding 应用服务，编排 GET status / Skip / Complete。
+type Service struct {
+	repo    domainonboarding.Repository
+	checker PermissionChecker
+}
+
+// NewService 创建 onboarding 应用服务。checker 可为 nil（兼容旧引导路径）。
+func NewService(repo domainonboarding.Repository, checker PermissionChecker) *Service {
+	return &Service{repo: repo, checker: checker}
+}
+
+func (s *Service) require(ctx context.Context, brandID, actorID int64, code string) error {
+	if s.checker == nil {
+		return nil
+	}
+	return s.checker.Require(ctx, brandID, actorID, code)
 }
 
 // GetOnboardingStatus 聚合 brand 信息 + 7 张表 COUNT + 已存的 step 记录，
@@ -102,7 +117,11 @@ func (s *Service) GetOnboardingStatus(ctx context.Context, brandID int64) (*doma
 }
 
 // SkipStep 跳过非强制 step。brand_profile / location 调用一律 STEP_NOT_SKIPPABLE。
-func (s *Service) SkipStep(ctx context.Context, brandID int64, stepKey string, reason string) (*domainonboarding.StepRecord, error) {
+// 需要 brand.profile.edit 权限（onboarding 是品牌资料管理的延伸）。
+func (s *Service) SkipStep(ctx context.Context, brandID, actorID int64, stepKey string, reason string) (*domainonboarding.StepRecord, error) {
+	if err := s.require(ctx, brandID, actorID, "brand.profile.edit"); err != nil {
+		return nil, err
+	}
 	if brandID <= 0 {
 		return nil, apperr.ErrBadRequest("品牌 ID 无效")
 	}
@@ -127,7 +146,11 @@ func (s *Service) SkipStep(ctx context.Context, brandID int64, stepKey string, r
 
 // Complete 校验所有 8 步处于 completed / skipped，否则 ONBOARDING_NOT_READY。
 // 重复调用幂等：第二次直接返已 completed 视图。
-func (s *Service) Complete(ctx context.Context, brandID int64) (*domainonboarding.OnboardingStatus, error) {
+// 需要 brand.profile.edit 权限。
+func (s *Service) Complete(ctx context.Context, brandID, actorID int64) (*domainonboarding.OnboardingStatus, error) {
+	if err := s.require(ctx, brandID, actorID, "brand.profile.edit"); err != nil {
+		return nil, err
+	}
 	if brandID <= 0 {
 		return nil, apperr.ErrBadRequest("品牌 ID 无效")
 	}

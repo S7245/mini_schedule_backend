@@ -55,7 +55,8 @@ func (h *OnboardingHandler) skipStep(c *gin.Context) {
 		}
 	}
 
-	rec, err := h.svc.SkipStep(c.Request.Context(), brandID, stepKey, body.Reason)
+	actorID := middleware.GetUserID(c)
+	rec, err := h.svc.SkipStep(c.Request.Context(), brandID, actorID, stepKey, body.Reason)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -69,7 +70,8 @@ func (h *OnboardingHandler) skipStep(c *gin.Context) {
 
 func (h *OnboardingHandler) complete(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
-	st, err := h.svc.Complete(c.Request.Context(), brandID)
+	actorID := middleware.GetUserID(c)
+	st, err := h.svc.Complete(c.Request.Context(), brandID, actorID)
 	if err != nil {
 		response.Error(c, err)
 		return

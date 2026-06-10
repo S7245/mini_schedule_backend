@@ -26,7 +26,8 @@ func (h *ProfileHandler) RegisterRoutes(g *gin.RouterGroup) {
 
 func (h *ProfileHandler) get(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
-	p, err := h.svc.GetProfile(c.Request.Context(), brandID)
+	actorID := middleware.GetUserID(c)
+	p, err := h.svc.GetProfile(c.Request.Context(), brandID, actorID)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -45,12 +46,13 @@ type patchProfileBody struct {
 
 func (h *ProfileHandler) patch(c *gin.Context) {
 	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
 	var body patchProfileBody
 	if err := c.ShouldBindJSON(&body); err != nil {
 		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
 		return
 	}
-	p, err := h.svc.UpdateProfile(c.Request.Context(), brandID, appBrandProfile.Input{
+	p, err := h.svc.UpdateProfile(c.Request.Context(), brandID, actorID, appBrandProfile.Input{
 		LogoURL:      body.LogoURL,
 		Description:  body.Description,
 		IndustryType: body.IndustryType,
