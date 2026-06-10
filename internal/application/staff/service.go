@@ -76,6 +76,43 @@ func (s *Service) resolveScope(ctx context.Context, brandID, actorID int64) (*do
 	return &scope, nil
 }
 
+// scopeFilterIDs 把 DataScope 转换为 ListFilter.ScopeLocationIDs 语义：
+// nil（checker 缺省 / all_brand）→ nil 不限制；assigned_locations → ids；none → 空切片拒绝所有。
+func scopeFilterIDs(scope *domainrbac.DataScope) []int64 {
+	if scope == nil || scope.Kind == domainrbac.DataScopeAllBrand {
+		return nil
+	}
+	if scope.Kind == domainrbac.DataScopeAssignedLocations {
+		if len(scope.LocationIDs) == 0 {
+			return []int64{}
+		}
+		return scope.LocationIDs
+	}
+	// DataScopeNone 或未知 → 拒绝所有
+	return []int64{}
+}
+
+// guardTargetInScope 详情/写路径守卫：assigned_locations 时目标 staff 必须任职在 scope 内，
+// 否则按"不可见"返 404（per 契约决定 4：跨 scope 用 404 隐藏存在性）。
+func (s *Service) guardTargetInScope(ctx context.Context, brandID, actorID, targetID int64) error {
+	scope, err := s.resolveScope(ctx, brandID, actorID)
+	if err != nil {
+		return err
+	}
+	ids := scopeFilterIDs(scope)
+	if ids == nil {
+		return nil // all_brand
+	}
+	ok, err := s.repo.InScopeLocations(ctx, brandID, targetID, ids)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return apperr.NewAppError(apperr.ErrStaffNotFound, "员工不存在", 404)
+	}
+	return nil
+}
+
 // Public input types（handler 直接构造，不经 domain）。
 
 type CreateInput struct {
@@ -270,11 +307,20 @@ func (s *Service) Get(ctx context.Context, brandID, actorID, id int64) (*staff.S
 	if err := s.require(ctx, brandID, actorID, "staff.view"); err != nil {
 		return nil, err
 	}
+	// Batch 6 T07：assigned_locations 时目标不在 scope → 404
+	if err := s.guardTargetInScope(ctx, brandID, actorID, id); err != nil {
+		return nil, err
+	}
 	return s.repo.GetWithAssignments(ctx, brandID, id)
 }
 
 func (s *Service) List(ctx context.Context, in ListInput) ([]*staff.Staff, int64, error) {
 	if err := s.require(ctx, in.BrandID, in.ActorID, "staff.view"); err != nil {
+		return nil, 0, err
+	}
+	// Batch 6 T07：拿 actor 的 data_scope 收紧列表
+	scope, err := s.resolveScope(ctx, in.BrandID, in.ActorID)
+	if err != nil {
 		return nil, 0, err
 	}
 	page := in.Page
@@ -289,15 +335,19 @@ func (s *Service) List(ctx context.Context, in ListInput) ([]*staff.Staff, int64
 		size = 100
 	}
 	return s.repo.List(ctx, staff.ListFilter{
-		BrandID:       in.BrandID,
-		Status:        in.Status,
-		HasInstructor: in.HasInstructor,
-		Search:        in.Search,
+		BrandID:          in.BrandID,
+		Status:           in.Status,
+		HasInstructor:    in.HasInstructor,
+		Search:           in.Search,
+		ScopeLocationIDs: scopeFilterIDs(scope),
 	}, (page-1)*size, size)
 }
 
 func (s *Service) Update(ctx context.Context, brandID, actorID, id int64, in UpdateInput) (*staff.Staff, error) {
 	if err := s.require(ctx, brandID, actorID, "staff.edit"); err != nil {
+		return nil, err
+	}
+	if err := s.guardTargetInScope(ctx, brandID, actorID, id); err != nil {
 		return nil, err
 	}
 	if in.Name != nil {
@@ -318,6 +368,9 @@ func (s *Service) UpdateStatus(ctx context.Context, brandID, actorID, id int64, 
 	if err := s.require(ctx, brandID, actorID, "staff.edit"); err != nil {
 		return nil, err
 	}
+	if err := s.guardTargetInScope(ctx, brandID, actorID, id); err != nil {
+		return nil, err
+	}
 	if !staff.IsValidStatus(status) {
 		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "员工状态无效", 400)
 	}
@@ -331,6 +384,9 @@ func (s *Service) UpdateStatus(ctx context.Context, brandID, actorID, id int64, 
 
 func (s *Service) Delete(ctx context.Context, brandID, actorID, id int64) error {
 	if err := s.require(ctx, brandID, actorID, "staff.delete"); err != nil {
+		return err
+	}
+	if err := s.guardTargetInScope(ctx, brandID, actorID, id); err != nil {
 		return err
 	}
 	if err := s.ensureNotLastActiveOwner(ctx, brandID, id); err != nil {
@@ -363,6 +419,9 @@ func (s *Service) ReplaceRoleAssignments(
 	ctx context.Context, brandID, actorID, id int64, items []staff.RoleAssignmentInput,
 ) (*staff.Staff, error) {
 	if err := s.require(ctx, brandID, actorID, "staff.assign_role"); err != nil {
+		return nil, err
+	}
+	if err := s.guardTargetInScope(ctx, brandID, actorID, id); err != nil {
 		return nil, err
 	}
 	// 校验目标 staff 存在
@@ -424,6 +483,9 @@ func (s *Service) ReplaceLocationAssignments(
 	if err := s.require(ctx, brandID, actorID, "staff.assign_location"); err != nil {
 		return nil, err
 	}
+	if err := s.guardTargetInScope(ctx, brandID, actorID, id); err != nil {
+		return nil, err
+	}
 	if _, err := s.repo.GetByID(ctx, brandID, id); err != nil {
 		return nil, err
 	}
@@ -441,6 +503,9 @@ func (s *Service) GetInstructor(ctx context.Context, brandID, actorID, staffID i
 	if err := s.require(ctx, brandID, actorID, "instructor.view"); err != nil {
 		return nil, err
 	}
+	if err := s.guardTargetInScope(ctx, brandID, actorID, staffID); err != nil {
+		return nil, err
+	}
 	if _, err := s.repo.GetByID(ctx, brandID, staffID); err != nil {
 		return nil, err
 	}
@@ -450,6 +515,9 @@ func (s *Service) GetInstructor(ctx context.Context, brandID, actorID, staffID i
 // UpsertInstructor 编辑教练档案。
 func (s *Service) UpsertInstructor(ctx context.Context, brandID, actorID, staffID int64, in instructor.UpsertInput) (*instructor.Profile, error) {
 	if err := s.require(ctx, brandID, actorID, "instructor.edit"); err != nil {
+		return nil, err
+	}
+	if err := s.guardTargetInScope(ctx, brandID, actorID, staffID); err != nil {
 		return nil, err
 	}
 	if _, err := s.repo.GetByID(ctx, brandID, staffID); err != nil {
@@ -472,6 +540,9 @@ func (s *Service) UpsertInstructor(ctx context.Context, brandID, actorID, staffI
 // DeleteInstructor 注销教练档案。
 func (s *Service) DeleteInstructor(ctx context.Context, brandID, actorID, staffID int64) error {
 	if err := s.require(ctx, brandID, actorID, "instructor.edit"); err != nil {
+		return err
+	}
+	if err := s.guardTargetInScope(ctx, brandID, actorID, staffID); err != nil {
 		return err
 	}
 	if _, err := s.repo.GetByID(ctx, brandID, staffID); err != nil {

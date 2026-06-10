@@ -59,6 +59,9 @@ func (f *fakeStaffRepo) SoftDelete(_ context.Context, _, _, _ int64) error {
 func (f *fakeStaffRepo) CountActiveOwners(_ context.Context, _ int64) (int64, error) {
 	return f.ownerCount, f.ownerCountErr
 }
+func (f *fakeStaffRepo) InScopeLocations(_ context.Context, _, _ int64, _ []int64) (bool, error) {
+	return true, nil // 单测默认 in-scope；scope 收紧专项测试用独立 fake 覆盖
+}
 func (f *fakeStaffRepo) ReplaceRoleAssignments(_ context.Context, _, _, _ int64, items []staff.RoleAssignmentResolved) ([]staff.RoleAssignment, error) {
 	f.roleReplaced = items
 	return nil, f.roleReplaceErr

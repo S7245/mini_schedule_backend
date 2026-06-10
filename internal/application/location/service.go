@@ -33,6 +33,46 @@ func (s *Service) require(ctx context.Context, brandID, actorID int64, code stri
 	return s.checker.Require(ctx, brandID, actorID, code)
 }
 
+// scopeFilterIDs 拿 actor 的 data_scope 转为 ListLocationsFilter.ScopeLocationIDs（Batch 6 T07）。
+// nil = all_brand 不限制；空切片 = DataScopeNone 拒绝所有。
+func (s *Service) scopeFilterIDs(ctx context.Context, brandID, actorID int64) ([]int64, error) {
+	if s.checker == nil {
+		return nil, nil
+	}
+	_, scope, err := s.checker.Resolve(ctx, brandID, actorID)
+	if err != nil {
+		return nil, err
+	}
+	switch scope.Kind {
+	case domainrbac.DataScopeAllBrand:
+		return nil, nil
+	case domainrbac.DataScopeAssignedLocations:
+		if len(scope.LocationIDs) == 0 {
+			return []int64{}, nil
+		}
+		return scope.LocationIDs, nil
+	default:
+		return []int64{}, nil
+	}
+}
+
+// guardLocationInScope 详情/写路径守卫：assigned_locations 时目标 location 必须在 scope 内，否则 404。
+func (s *Service) guardLocationInScope(ctx context.Context, brandID, actorID, id int64) error {
+	ids, err := s.scopeFilterIDs(ctx, brandID, actorID)
+	if err != nil {
+		return err
+	}
+	if ids == nil {
+		return nil // all_brand
+	}
+	for _, lid := range ids {
+		if lid == id {
+			return nil
+		}
+	}
+	return apperr.NewAppError(apperr.ErrLocationNotFound, "门店不存在", 404)
+}
+
 // CreateInput 创建入参。
 type CreateInput struct {
 	BrandID int64
@@ -89,6 +129,9 @@ func (s *Service) Get(ctx context.Context, brandID, actorID, id int64) (*domainl
 	if err := s.require(ctx, brandID, actorID, "location.view"); err != nil {
 		return nil, err
 	}
+	if err := s.guardLocationInScope(ctx, brandID, actorID, id); err != nil {
+		return nil, err
+	}
 	return s.repo.GetByID(ctx, brandID, id)
 }
 
@@ -114,15 +157,25 @@ func (s *Service) List(ctx context.Context, in ListInput) ([]*domainlocation.Loc
 		status = ""
 	}
 
+	// Batch 6 T07：按 actor 的 data_scope 收紧列表
+	scopeIDs, err := s.scopeFilterIDs(ctx, in.BrandID, in.ActorID)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	return s.repo.List(ctx, domainlocation.ListLocationsFilter{
-		BrandID: in.BrandID,
-		Status:  status,
+		BrandID:          in.BrandID,
+		Status:           status,
+		ScopeLocationIDs: scopeIDs,
 	}, (page-1)*pageSize, pageSize)
 }
 
 // Update 普通字段编辑。per 契约 Q5：本批不写 OperationLog（只创建 / 状态切换 / 删除 才写）。
 func (s *Service) Update(ctx context.Context, brandID, actorID, id int64, in UpdateInput) (*domainlocation.Location, error) {
 	if err := s.require(ctx, brandID, actorID, "location.edit"); err != nil {
+		return nil, err
+	}
+	if err := s.guardLocationInScope(ctx, brandID, actorID, id); err != nil {
 		return nil, err
 	}
 	if in.Name != nil {
@@ -148,6 +201,9 @@ func (s *Service) UpdateStatus(ctx context.Context, brandID, actorID, id int64, 
 	if err := s.require(ctx, brandID, actorID, "location.edit"); err != nil {
 		return nil, err
 	}
+	if err := s.guardLocationInScope(ctx, brandID, actorID, id); err != nil {
+		return nil, err
+	}
 	if !domainlocation.IsValidStatus(status) {
 		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "无效的门店状态", 400)
 	}
@@ -157,6 +213,9 @@ func (s *Service) UpdateStatus(ctx context.Context, brandID, actorID, id int64, 
 // Delete 软删。
 func (s *Service) Delete(ctx context.Context, brandID, actorID, id int64) error {
 	if err := s.require(ctx, brandID, actorID, "location.delete"); err != nil {
+		return err
+	}
+	if err := s.guardLocationInScope(ctx, brandID, actorID, id); err != nil {
 		return err
 	}
 	return s.repo.SoftDelete(ctx, brandID, actorID, id)

@@ -92,10 +92,13 @@ type RoleAssignmentInput struct {
 
 // ListFilter 列表查询条件。
 type ListFilter struct {
-	BrandID        int64
-	Status         string
-	HasInstructor  *bool
-	Search         string
+	BrandID       int64
+	Status        string
+	HasInstructor *bool
+	Search        string
+	// ScopeLocationIDs 非 nil 时按 data_scope 收紧：只返任职在这些 location 的 staff（Batch 6 T07）。
+	// nil = 不限制（all_brand）；空切片 = 拒绝所有（DataScopeNone）。
+	ScopeLocationIDs []int64
 }
 
 // Repository staff 仓储接口（DB 操作收敛在 infrastructure/persistence）。
@@ -103,6 +106,8 @@ type Repository interface {
 	Create(ctx context.Context, in CreateInput) (*Staff, error)
 	GetByID(ctx context.Context, brandID, id int64) (*Staff, error)
 	GetWithAssignments(ctx context.Context, brandID, id int64) (*Staff, error)
+	// InScopeLocations 判断 staff 是否任职在给定 location 集内（data_scope=assigned_locations 详情守卫用）。
+	InScopeLocations(ctx context.Context, brandID, staffID int64, locationIDs []int64) (bool, error)
 	List(ctx context.Context, filter ListFilter, offset, limit int) ([]*Staff, int64, error)
 	Update(ctx context.Context, brandID, actorID, id int64, in UpdateInput) (*Staff, error)
 	UpdateStatus(ctx context.Context, brandID, actorID, id int64, status Status) (*Staff, error)

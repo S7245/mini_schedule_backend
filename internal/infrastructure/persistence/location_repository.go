@@ -106,6 +106,14 @@ func (r *locationRepository) List(ctx context.Context, filter location.ListLocat
 	if filter.Status == string(location.StatusActive) || filter.Status == string(location.StatusInactive) {
 		q = q.Where("status = ?", filter.Status)
 	}
+	// Batch 6 T07：data_scope=assigned_locations 收紧。nil = 不限制；空切片 = 拒绝所有。
+	if filter.ScopeLocationIDs != nil {
+		if len(filter.ScopeLocationIDs) == 0 {
+			q = q.Where("1 = 0")
+		} else {
+			q = q.Where("id IN ?", filter.ScopeLocationIDs)
+		}
+	}
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {

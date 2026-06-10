@@ -137,6 +137,17 @@ func (r *staffRepository) List(ctx context.Context, filter staff.ListFilter, off
 		}
 	}
 
+	// Batch 6 T07：data_scope=assigned_locations 收紧 — 只返任职在 scope location 集内的 staff。
+	// nil = all_brand 不限制；空切片 = DataScopeNone 拒绝所有。
+	if filter.ScopeLocationIDs != nil {
+		if len(filter.ScopeLocationIDs) == 0 {
+			q = q.Where("1 = 0")
+		} else {
+			q = q.Where("EXISTS (SELECT 1 FROM staff_location_assignments sla WHERE sla.brand_user_id = brand_users.id AND sla.brand_id = ? AND sla.status = 'active' AND sla.location_id IN ?)",
+				filter.BrandID, filter.ScopeLocationIDs)
+		}
+	}
+
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, apperr.ErrInternalF("查询员工列表失败", err)
@@ -282,6 +293,22 @@ func (r *staffRepository) SoftDelete(ctx context.Context, brandID, actorID, id i
 			Before:  &before,
 		})
 	})
+}
+
+// InScopeLocations 判断 staff 是否任职在给定 location 集内（Batch 6 T07 详情守卫）。
+// locationIDs 空切片 → false（DataScopeNone）。
+func (r *staffRepository) InScopeLocations(ctx context.Context, brandID, staffID int64, locationIDs []int64) (bool, error) {
+	if len(locationIDs) == 0 {
+		return false, nil
+	}
+	var count int64
+	if err := r.db.WithContext(ctx).
+		Table("staff_location_assignments").
+		Where("brand_id = ? AND brand_user_id = ? AND status = 'active' AND location_id IN ?", brandID, staffID, locationIDs).
+		Count(&count).Error; err != nil {
+		return false, apperr.ErrInternalF("查询员工任职范围失败", err)
+	}
+	return count > 0, nil
 }
 
 func (r *staffRepository) CountActiveOwners(ctx context.Context, brandID int64) (int64, error) {
