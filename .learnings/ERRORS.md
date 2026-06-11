@@ -71,3 +71,36 @@ psql -d mini_schedule -c 'ALTER TABLE brands ADD COLUMN IF NOT EXISTS descriptio
 - **DB 列即便是单 `VARCHAR`，handler 也接受 `[]string`**，内部 join/split 桥接。理由：前端控件（chip / tag input）天然产出数组；如果让前端 join，每个调用点都要复制 trim/dedup/skip-empty 逻辑，必然漂移。
 - Handler 加 helper `joinCSV` / `splitCSV` 统一 trim + 跳空 + 可选 dedup，杜绝"前导/尾随空逗号"脏数据进库。
 - 通用 INVALID_REQUEST 调试线索藏在 access log 的 raw body；建议下一批给 `response.Error` 在 bind error 分支带上 unmarshal 错误的 field path（`json.UnmarshalTypeError.Field`），调试链路缩短一个量级。
+
+## 2026-06-11 Batch 6 service_test 因新增 PermissionChecker 依赖踩坑
+
+### 存量 service 单测在 service 构造器加 checker 形参后编译 / 行为双重断裂
+
+**症状**：staff / onboarding service 的 `NewService` 签名末尾加 `checker PermissionChecker` 后，存量测试要么编译失败（`not enough arguments in call to NewService`），要么编译过但 happy-path 用例突然返 404 / PERMISSION_DENIED——明明没改业务逻辑。
+
+**根因（两层）**：
+1. **构造器形参变更未同步存量调用点**：所有 `NewService(repo, roleRepo, instrRepo)` 调用少一个参数直接编译炸。
+2. **fake checker 的零值 `DataScope` 不是"放行"而是"拒绝所有"**：`fakePermissionChecker.Resolve` 默认返 `domainrbac.DataScope{}`（`Kind == ""`）。而 `scopeFilterIDs` 对 `Kind==""`（DataScopeNone / 未知）一律映射成 `[]int64{}`（reject-all，fail-closed），于是详情/列表 happy-path 全被 scope 守卫挡成 404 / 空列表。开发者第一反应是"权限逻辑写错了"，实则是 fake 的默认 scope 没设。
+
+**修复**：
+1. 加一个 `newSvc(...)` helper 用 **nil checker**（走 bypass）保留所有不关心权限的存量用例不动；另加 `newSvcWithChecker(...)` 专门给 Batch 6 新增的 `Test*_Requires*` 权限闸门用例。两条构造路径并存，存量测试零改动。
+2. 凡是要跑通 happy-path 又注入了 fake checker 的用例，**必须显式设 `resolveScope: domainrbac.DataScope{Kind: DataScopeAllBrand}`**，否则零值 scope = reject-all。
+3. onboarding test 顶部补 `domainrbac "github.com/zkw/mini-schedule/backend/internal/domain/rbac"` import（fake checker 的 `Resolve` 签名引用了 domain 类型），漏补就是 missing-import 编译错。
+
+**通用化教训**：
+- **给构造器尾部加依赖，优先用"nil = bypass"语义 + 一个保留旧签名的 helper**，让存量测试零改动，只给新行为写新用例。比"全量改调用点 + 给每个 fake 补默认实现"成本低、回归面小。
+- **fake 的零值默认必须对齐生产 fail-closed / fail-open 取向**：本批 scope 是 fail-closed（零值 = 拒绝），所以 fake 默认零值 = 拒绝是一致的——但它会让"忘记设 scope"的 happy-path 用例静默变 404，排查时先查 fake 的 scope 设没设，再怀疑业务逻辑。Course / Learner 接 checker 时同款陷阱。
+
+### Pending exposure：DataScope.LocationIDs 仍带 `omitempty`，前端迭代会复发 Batch 5 同款 TypeError
+
+`internal/domain/rbac/permission.go:98` 的 `LocationIDs []int64 \`json:"location_ids,omitempty"\`` 以及 `internal/interfaces/brand/me_handler.go:36` 的 `meDataScopeBlock.LocationIDs` 同样打了 `omitempty`。这正是 Batch 5 验收期 staff `location_assignments` 踩过的"前端会 `.map()` 的数组字段不要 omitempty"坑（见本文件 Batch 5 条目）。
+
+当前 me_handler 用了"仅当 `Kind==AssignedLocations` 才填 LocationIDs"的写法**部分**遮蔽了风险：all_brand / none 时前端本就不该读 location_ids。但只要出现 `Kind==AssignedLocations` 且 `LocationIDs` 为空切片（如 scope 配了 assigned_locations 但还没分任何门店的瞬态），`omitempty` 仍会把字段丢掉，前端 `data_scope.location_ids.map(...)` 复现 `Cannot read properties of undefined`。
+
+**建议**：me_handler 的 `meDataScopeBlock.LocationIDs` 去掉 `omitempty`，并在 handler 出口 nil → `[]int64{}` 规整（对齐 Batch 5 给 staff 数组字段定的规则）。domain 层 `DataScope.LocationIDs` 的 omitempty 是否保留可商榷——它同时进 Redis 缓存的 JSON（`cachedResolve.Scope`），缓存形态空切片 vs 缺字段对 `MergeScopes` 无影响（反序列化都得 nil slice），所以 domain 层保留 omitempty 无害；**但凡是直接出给前端的 response 结构体一律去 omitempty**。全仓复查：`grep -RnE '\[\][A-Za-z].*omitempty' internal/interfaces/` 找出所有出 handler 的数组 omitempty 字段。
+
+### Pending exposure：RBAC L1 缓存按 brand_user 单维度 key，跨 brand 复用同一 brand_user_id 会串权限
+
+`application/rbac/checker.go` 的 L1 缓存 key 是 `cacheKeyForUser(brandUserID)` = `rbac:perms:<brandUserID>`，**只含 brand_user_id 不含 brand_id**。当前数据模型下 brand_user_id 全局唯一、且天然属于单一 brand，所以不会串。但这是一个隐含不变量——**一旦未来 brand_user 支持跨 brand（同一自然人在多 brand 任职、复用同一 brand_user 记录），单维度 key 会让 A brand 的权限集泄漏到 B brand 的请求**。
+
+ctx-cache 那一层 key 是 `requestKey(brandID, brandUserID)`（含 brand_id，正确），唯独 Redis L1 漏了 brand_id。**建议**：即便当前不变量成立，也把 L1 key 改成 `rbac:perms:<brandID>:<brandUserID>` 提前对齐 ctx-cache 维度，消除这个"靠数据模型巧合保证正确"的脆弱依赖；改 key 只需配合 TTL 自然过期，无需手动清缓存。

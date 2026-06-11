@@ -41,3 +41,10 @@
 - **B18 staff_repository.List HasInstructor 分支不对称**：true 分支用 `status='active'`，false 分支用 NOT EXISTS 不限 status。inactive instructor 在两边都漏。统一过滤策略。
 - **B19 AssignDefaultOwnerRoles ON CONFLICT 部分索引盲点**：唯一索引 WHERE status='active' AND location_id IS NULL；如果存在历史 status='inactive' 的 brand_owner 关联，ON CONFLICT 不命中会重复插入。改 `INSERT ... WHERE NOT EXISTS` 或先 UPDATE 拉起再 INSERT。
 - **B-delete-condition 扩展**：详情页删除按钮 disabled 条件目前只看 `is_owner`；后端将来扩 OWNER_PROTECTED 触发条件（如"最后一个 admin"）时 UI 不会预禁用，按钮可点 → 失败 toast。建议让后端先返回一个 `can_delete: false, reason: 'last_admin'` 字段，前端按它渲染 tooltip。
+
+## 2026-06-11 Batch 6 → Batch 7 延后项
+
+- **GET /roles/:code 单条角色详情**：Batch 6 只做了 GET /me/permissions（当前用户有效权限+data_scope）。品牌后台"角色管理"页需要按 code 查单个角色的权限明细，留 Batch 7 自定义角色 CRUD 一并做。
+- **GET /permissions 全量权限列表**：自定义角色编辑器需要一份"所有可分配 permission code + 中文名 + 分组（域）"的元数据列表给前端勾选。SoT 是 permissions 表，加一个只读 endpoint 即可。
+- **品牌自定义角色 / 调整权限 CRUD**：Batch 5 只 seed 了 8 个预置 role_templates → brand_roles；品牌后台自建角色、改角色权限、删角色的完整 CRUD 仍未做（Batch 5/6 两次列入，是 Batch 7 主线）。
+- **T10 完整回归未自动跑**：Batch 6 的 35 个测试场景（H1-H6 happy path + E1-E35 edge）只做了人工抽样验收，未生成端到端 Playwright/集成测试。建议 Batch 7 起飞前补关键路径（权限拒绝 403、data_scope 越权 404、owner fast-path）的自动化覆盖。
