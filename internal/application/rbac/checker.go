@@ -50,6 +50,7 @@ type cachedResolve struct {
 type cacheStore interface {
 	Get(ctx context.Context, key string) (*cachedResolve, error)
 	Set(ctx context.Context, key string, val *cachedResolve, ttl time.Duration) error
+	Del(ctx context.Context, key string) error
 }
 
 // Checker is the central permission gate.
@@ -133,6 +134,28 @@ func (c *Checker) Resolve(ctx context.Context, brandID, brandUserID int64) (doma
 	requestCacheSet(ctx, brandID, brandUserID, rc)
 
 	return domainrbac.Expand(rc.Codes), rc.Scope, nil
+}
+
+// Invalidate evicts the cached permission set for brandUserID. Call it after a
+// role's permissions/status change (Batch 7 C1) for every affected brand_user so
+// the next request re-resolves from DB instead of waiting out the 60s TTL.
+//
+// Both tiers are cleared: the L1 (Redis) key and any per-request ctx-cache entry
+// matching this brandUserID. L1 Del failures are non-fatal (logged); the TTL is
+// the backstop.
+func (c *Checker) Invalidate(ctx context.Context, brandUserID int64) error {
+	requestCacheDeleteUser(ctx, brandUserID)
+	if c.cache == nil {
+		return nil
+	}
+	if err := c.cache.Del(ctx, cacheKeyForUser(brandUserID)); err != nil {
+		c.log.Warn("rbac cache del failed",
+			slog.Int64("brand_user_id", brandUserID),
+			slog.Any("err", err),
+		)
+		return err
+	}
+	return nil
 }
 
 // Require permits the action when the resolved set contains code, otherwise
@@ -292,6 +315,23 @@ func requestKey(brandID, brandUserID int64) string {
 	return int64ToStr(brandID) + ":" + int64ToStr(brandUserID)
 }
 
+// requestCacheDeleteUser drops every ctx-cache entry for brandUserID regardless
+// of brand (key suffix ":<brandUserID>"). No-op when ctx has no request cache.
+func requestCacheDeleteUser(ctx context.Context, brandUserID int64) {
+	rc, ok := ctx.Value(ctxKey).(*requestCache)
+	if !ok || rc == nil {
+		return
+	}
+	suffix := ":" + int64ToStr(brandUserID)
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	for k := range rc.data {
+		if len(k) >= len(suffix) && k[len(k)-len(suffix):] == suffix {
+			delete(rc.data, k)
+		}
+	}
+}
+
 // ---- Redis cache adapter ---------------------------------------------------
 
 type redisCache struct {
@@ -333,4 +373,11 @@ func (r *redisCache) Set(ctx context.Context, key string, val *cachedResolve, tt
 		return err
 	}
 	return r.client.Set(ctx, key, buf, ttl).Err()
+}
+
+func (r *redisCache) Del(ctx context.Context, key string) error {
+	if r == nil || r.client == nil {
+		return nil
+	}
+	return r.client.Del(ctx, key).Err()
 }

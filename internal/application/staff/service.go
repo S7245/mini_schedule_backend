@@ -24,6 +24,8 @@ import (
 type PermissionChecker interface {
 	Require(ctx context.Context, brandID, brandUserID int64, code string) error
 	Resolve(ctx context.Context, brandID, brandUserID int64) (domainrbac.PermissionSet, domainrbac.DataScope, error)
+	// Invalidate evicts the cached permission set for a brand_user (Batch 7 C1).
+	Invalidate(ctx context.Context, brandUserID int64) error
 }
 
 // Service 编排 staff CRUD + 角色 / 任职 / 教练。
@@ -581,4 +583,218 @@ func (s *Service) GetRole(ctx context.Context, brandID, actorID int64, code stri
 		}
 	}
 	return br, nil
+}
+
+// roleNameMax 角色名长度上限（契约：1–40 字符）。
+const roleNameMax = 40
+
+// CreateRoleInput POST /brand/roles 入参（handler 构造）。
+type CreateRoleInput struct {
+	BrandID         int64
+	ActorID         int64
+	Name            string
+	ScopeType       string
+	Description     string
+	PermissionCodes []string
+}
+
+// UpdateRoleInput PUT /brand/roles/:code 入参（scope_type 不接受，A3）。
+type UpdateRoleInput struct {
+	BrandID         int64
+	ActorID         int64
+	Code            string
+	Name            string
+	Description     string
+	PermissionCodes []string
+}
+
+// ListPermissions GET /brand/permissions —— 全量细粒度权限（gate role.manage）。
+func (s *Service) ListPermissions(ctx context.Context, brandID, actorID int64) ([]role.Permission, error) {
+	if err := s.require(ctx, brandID, actorID, "role.manage"); err != nil {
+		return nil, err
+	}
+	return s.roleRepo.ListPermissions(ctx)
+}
+
+// CreateRole 新建自定义角色（gate role.manage）。
+// B1：非 owner 时 permission_codes 必须 ⊆ actor 有效权限集，否则 ROLE_PERMISSION_EXCEEDS_ACTOR。
+func (s *Service) CreateRole(ctx context.Context, in CreateRoleInput) (*role.BrandRole, error) {
+	if err := s.require(ctx, in.BrandID, in.ActorID, "role.manage"); err != nil {
+		return nil, err
+	}
+	if err := validateRoleName(in.Name); err != nil {
+		return nil, err
+	}
+	if in.ScopeType != role.ScopeBrand && in.ScopeType != role.ScopeLocation {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "scope_type 不合法", 400)
+	}
+	if err := s.guardPermissionSubset(ctx, in.BrandID, in.ActorID, in.PermissionCodes); err != nil {
+		return nil, err
+	}
+	created, err := s.roleRepo.CreateBrandRole(ctx, role.CreateBrandRoleInput{
+		BrandID:         in.BrandID,
+		ActorID:         in.ActorID,
+		Name:            strings.TrimSpace(in.Name),
+		ScopeType:       in.ScopeType,
+		Description:     strings.TrimSpace(in.Description),
+		PermissionCodes: in.PermissionCodes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+// UpdateRole 编辑自定义角色（gate role.manage）。
+// 拦截 is_system / brand_owner；B1 提权校验；scope_type 不可改（A3，入参里没有 scope_type）。
+// C1：成功后 post-commit 失效持有该角色的全部 brand_user 缓存。
+func (s *Service) UpdateRole(ctx context.Context, in UpdateRoleInput) (*role.BrandRole, error) {
+	if err := s.require(ctx, in.BrandID, in.ActorID, "role.manage"); err != nil {
+		return nil, err
+	}
+	if err := validateRoleName(in.Name); err != nil {
+		return nil, err
+	}
+	target, err := s.requireMutableCustomRole(ctx, in.BrandID, in.Code)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.guardPermissionSubset(ctx, in.BrandID, in.ActorID, in.PermissionCodes); err != nil {
+		return nil, err
+	}
+	updated, err := s.roleRepo.UpdateBrandRole(ctx, role.UpdateBrandRoleInput{
+		BrandID:         in.BrandID,
+		ActorID:         in.ActorID,
+		RoleID:          target.ID,
+		Name:            strings.TrimSpace(in.Name),
+		Description:     strings.TrimSpace(in.Description),
+		PermissionCodes: in.PermissionCodes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.invalidateRoleHolders(ctx, target.ID)
+	return updated, nil
+}
+
+// PatchRoleStatus PATCH /brand/roles/:code/status（gate role.manage）。
+func (s *Service) PatchRoleStatus(ctx context.Context, brandID, actorID int64, code, status string) (*role.BrandRole, error) {
+	if err := s.require(ctx, brandID, actorID, "role.manage"); err != nil {
+		return nil, err
+	}
+	if status != "active" && status != "inactive" {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "状态不合法", 400)
+	}
+	target, err := s.requireMutableCustomRole(ctx, brandID, code)
+	if err != nil {
+		return nil, err
+	}
+	updated, err := s.roleRepo.UpdateBrandRoleStatus(ctx, brandID, actorID, target.ID, status)
+	if err != nil {
+		return nil, err
+	}
+	s.invalidateRoleHolders(ctx, target.ID)
+	return updated, nil
+}
+
+// DeleteRole DELETE /brand/roles/:code（gate role.manage）。
+// A4：仍有 active 任职引用时拒删 → ROLE_IN_USE。
+func (s *Service) DeleteRole(ctx context.Context, brandID, actorID int64, code string) error {
+	if err := s.require(ctx, brandID, actorID, "role.manage"); err != nil {
+		return err
+	}
+	target, err := s.requireMutableCustomRole(ctx, brandID, code)
+	if err != nil {
+		return err
+	}
+	count, err := s.roleRepo.CountActiveAssignmentsByRole(ctx, target.ID)
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return apperr.NewAppError(apperr.ErrRoleInUse, "该角色仍有员工任职，请先移除", 409)
+	}
+	// 删前先取持有人（删后任职行可能被外键级联，反查不到）——本场景 count==0 故为空，
+	// 但保持对称：仍调用以兜底（例如非 active 任职）。
+	holders, _ := s.roleRepo.ListBrandUserIDsByRole(ctx, target.ID)
+	if err := s.roleRepo.DeleteBrandRole(ctx, brandID, actorID, target.ID); err != nil {
+		return err
+	}
+	for _, uid := range holders {
+		_ = s.invalidateUser(ctx, uid)
+	}
+	return nil
+}
+
+// requireMutableCustomRole 取角色并拦截系统角色 / owner 系统角色（A1/D2）。
+func (s *Service) requireMutableCustomRole(ctx context.Context, brandID int64, code string) (*role.BrandRole, error) {
+	br, err := s.roleRepo.GetBrandRoleByCode(ctx, brandID, code)
+	if err != nil {
+		return nil, err
+	}
+	if br.Code == "brand_owner" {
+		return nil, apperr.NewAppError(apperr.ErrOwnerProtected, "品牌负责人角色受保护，不可修改或删除", 409)
+	}
+	if br.IsSystem {
+		return nil, apperr.NewAppError(apperr.ErrRoleIsSystem, "系统角色只读，不可修改或删除", 409)
+	}
+	return br, nil
+}
+
+// guardPermissionSubset B1：非 owner 时勾选权限必须 ⊆ actor 有效权限集。
+// owner（is_owner=TRUE）跳过。checker == nil（引导路径）跳过。
+func (s *Service) guardPermissionSubset(ctx context.Context, brandID, actorID int64, codes []string) error {
+	if s.checker == nil || len(codes) == 0 {
+		return nil
+	}
+	actor, err := s.repo.GetByID(ctx, brandID, actorID)
+	if err != nil {
+		return err
+	}
+	if actor.IsOwner {
+		return nil
+	}
+	effective, _, err := s.checker.Resolve(ctx, brandID, actorID)
+	if err != nil {
+		return err
+	}
+	for _, c := range codes {
+		if !effective.Has(c) {
+			return apperr.NewAppError(apperr.ErrRolePermissionExceedsActor, "勾选的权限超出你自身的权限范围", 403).
+				WithDetails(map[string]any{"exceeded": c})
+		}
+	}
+	return nil
+}
+
+// invalidateRoleHolders C1：反查持有该角色的全部 brand_user 并逐一失效缓存（post-commit）。
+func (s *Service) invalidateRoleHolders(ctx context.Context, roleID int64) {
+	if s.checker == nil {
+		return
+	}
+	ids, err := s.roleRepo.ListBrandUserIDsByRole(ctx, roleID)
+	if err != nil {
+		return // 失效失败不阻断主流程；60s TTL 兜底
+	}
+	for _, uid := range ids {
+		_ = s.invalidateUser(ctx, uid)
+	}
+}
+
+func (s *Service) invalidateUser(ctx context.Context, brandUserID int64) error {
+	if s.checker == nil {
+		return nil
+	}
+	return s.checker.Invalidate(ctx, brandUserID)
+}
+
+func validateRoleName(name string) error {
+	v := strings.TrimSpace(name)
+	if v == "" {
+		return apperr.NewAppError(apperr.ErrInvalidParam, "角色名不能为空", 400)
+	}
+	if len([]rune(v)) > roleNameMax {
+		return apperr.NewAppError(apperr.ErrInvalidParam, "角色名过长", 400)
+	}
+	return nil
 }

@@ -164,11 +164,13 @@ func (f *fakeInstrRepo) Delete(_ context.Context, _, _, _ int64) error { return 
 
 // fakePermissionChecker records Require calls and returns configured errors.
 type fakePermissionChecker struct {
-	requireErrs  map[string]error // by permission code; nil → permit
-	requireSeen  []string
-	resolveErr   error
-	resolveSet   domainrbac.PermissionSet
-	resolveScope domainrbac.DataScope
+	requireErrs    map[string]error // by permission code; nil → permit
+	requireSeen    []string
+	resolveErr     error
+	resolveSet     domainrbac.PermissionSet
+	resolveScope   domainrbac.DataScope
+	invalidatedIDs []int64
+	invalidateErr  error
 }
 
 func (f *fakePermissionChecker) Require(_ context.Context, _, _ int64, code string) error {
@@ -184,6 +186,11 @@ func (f *fakePermissionChecker) Require(_ context.Context, _, _ int64, code stri
 
 func (f *fakePermissionChecker) Resolve(_ context.Context, _, _ int64) (domainrbac.PermissionSet, domainrbac.DataScope, error) {
 	return f.resolveSet, f.resolveScope, f.resolveErr
+}
+
+func (f *fakePermissionChecker) Invalidate(_ context.Context, brandUserID int64) error {
+	f.invalidatedIDs = append(f.invalidatedIDs, brandUserID)
+	return f.invalidateErr
 }
 
 func newSvc(sr *fakeStaffRepo, rr *fakeRoleRepo, ir *fakeInstrRepo) *Service {

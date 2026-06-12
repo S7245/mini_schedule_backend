@@ -38,6 +38,7 @@ type memCache struct {
 	store  map[string]cacheEntry
 	getErr error
 	setErr error
+	delErr error
 }
 
 func newMemCache() *memCache {
@@ -70,6 +71,23 @@ func (c *memCache) Set(_ context.Context, key string, val *cachedResolve, _ time
 	}
 	c.store[key] = cacheEntry{val: *val, expiresAt: time.Now().Add(time.Hour)}
 	return nil
+}
+
+func (c *memCache) Del(_ context.Context, key string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.delErr != nil {
+		return c.delErr
+	}
+	delete(c.store, key)
+	return nil
+}
+
+func (c *memCache) has(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.store[key]
+	return ok
 }
 
 type cacheEntry struct {
@@ -247,5 +265,58 @@ func TestRequireScope_NoneDenies(t *testing.T) {
 	err := c.RequireScope(context.Background(), 1, 18, []int64{1})
 	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrPermissionDenied {
 		t.Fatalf("expected PERMISSION_DENIED, got %v", err)
+	}
+}
+
+// ---- Batch 7: Invalidate (C1) ----
+
+func TestInvalidate_EvictsL1Key(t *testing.T) {
+	repo := &fakeRBACRepo{rawCodes: []string{"staff.view"}, scope: domainrbac.DataScope{Kind: domainrbac.DataScopeAllBrand}}
+	cache := newMemCache()
+	c := newCheckerWithFakes(t, repo, cache)
+
+	// Prime the L1 cache via a Resolve.
+	if _, _, err := c.Resolve(context.Background(), 1, 42); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !cache.has(cacheKeyForUser(42)) {
+		t.Fatalf("expected L1 key cached after Resolve")
+	}
+
+	if err := c.Invalidate(context.Background(), 42); err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+	if cache.has(cacheKeyForUser(42)) {
+		t.Fatalf("expected L1 key evicted after Invalidate")
+	}
+}
+
+func TestInvalidate_NilCacheIsNoOp(t *testing.T) {
+	repo := &fakeRBACRepo{}
+	c := newCheckerWithFakes(t, repo, nil)
+	if err := c.Invalidate(context.Background(), 7); err != nil {
+		t.Fatalf("Invalidate with nil cache should be no-op, got %v", err)
+	}
+}
+
+func TestInvalidate_ClearsCtxCacheEntry(t *testing.T) {
+	repo := &fakeRBACRepo{rawCodes: []string{"staff.view"}, scope: domainrbac.DataScope{Kind: domainrbac.DataScopeAllBrand}}
+	cache := newMemCache()
+	c := newCheckerWithFakes(t, repo, cache)
+
+	ctx := WithRequestCache(context.Background())
+	if _, _, err := c.Resolve(ctx, 5, 42); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	// ctx cache primed for 5:42; Invalidate should drop it so a re-Resolve hits DB.
+	loadsBefore := repo.loadCalls
+	if err := c.Invalidate(ctx, 42); err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+	if _, _, err := c.Resolve(ctx, 5, 42); err != nil {
+		t.Fatalf("Resolve after invalidate: %v", err)
+	}
+	if repo.loadCalls == loadsBefore {
+		t.Fatalf("expected a DB re-load after ctx-cache invalidation (loadCalls stayed %d)", loadsBefore)
 	}
 }
