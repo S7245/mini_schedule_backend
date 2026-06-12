@@ -168,12 +168,13 @@ func (r *roleRepository) ListPermissions(ctx context.Context) ([]role.Permission
 	out := make([]role.Permission, 0, len(rows))
 	for i := range rows {
 		out = append(out, role.Permission{
-			ID:     rows[i].ID,
-			Code:   rows[i].Code,
-			Domain: rows[i].Domain,
-			Action: rows[i].Action,
-			Name:   rows[i].Name,
-			Status: rows[i].Status,
+			ID:          rows[i].ID,
+			Code:        rows[i].Code,
+			Domain:      rows[i].Domain,
+			Action:      rows[i].Action,
+			Name:        rows[i].Name,
+			Description: rows[i].Description,
+			Status:      rows[i].Status,
 		})
 	}
 	return out, nil

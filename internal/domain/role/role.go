@@ -47,12 +47,13 @@ type BrandRole struct {
 
 // Permission permissions 表的领域投影。
 type Permission struct {
-	ID     int64  `json:"id"`
-	Code   string `json:"code"`
-	Domain string `json:"domain"`
-	Action string `json:"action"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
+	ID          int64  `json:"id"`
+	Code        string `json:"code"`
+	Domain      string `json:"domain"`
+	Action      string `json:"action"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Status      string `json:"status"`
 }
 
 // RoleTemplate role_templates 表的领域投影（用于 backfill 时复制）。

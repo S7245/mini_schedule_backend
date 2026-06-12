@@ -9,6 +9,7 @@ import (
 
 	appStaff "github.com/zkw/mini-schedule/backend/internal/application/staff"
 	"github.com/zkw/mini-schedule/backend/internal/domain/instructor"
+	"github.com/zkw/mini-schedule/backend/internal/domain/role"
 	"github.com/zkw/mini-schedule/backend/internal/domain/staff"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/middleware"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
@@ -37,6 +38,12 @@ func (h *StaffHandler) RegisterRoutes(g *gin.RouterGroup) {
 	g.PUT("/staff/:id/instructor", h.upsertInstructor)
 	g.DELETE("/staff/:id/instructor", h.deleteInstructor)
 	g.GET("/roles", h.listRoles)
+	g.GET("/roles/:id", h.getRole)
+	g.POST("/roles", h.createRole)
+	g.PUT("/roles/:id", h.updateRole)
+	g.PATCH("/roles/:id/status", h.patchRoleStatus)
+	g.DELETE("/roles/:id", h.deleteRole)
+	g.GET("/permissions", h.listPermissions)
 }
 
 func (h *StaffHandler) list(c *gin.Context) {
@@ -85,11 +92,11 @@ func (h *StaffHandler) get(c *gin.Context) {
 }
 
 type createStaffBody struct {
-	Phone               string                              `json:"phone"`
-	Name                string                              `json:"name"`
-	InitialPassword     string                              `json:"initial_password"`
-	RoleCodes           []string                            `json:"role_codes"`
-	LocationAssignments []staffLocationAssignmentReqBody    `json:"location_assignments"`
+	Phone               string                           `json:"phone"`
+	Name                string                           `json:"name"`
+	InitialPassword     string                           `json:"initial_password"`
+	RoleCodes           []string                         `json:"role_codes"`
+	LocationAssignments []staffLocationAssignmentReqBody `json:"location_assignments"`
 }
 
 type staffLocationAssignmentReqBody struct {
@@ -392,6 +399,190 @@ func (h *StaffHandler) listRoles(c *gin.Context) {
 		return
 	}
 	response.Success(c, roles)
+}
+
+// roleCodeParam 取 :id 段作为角色 code（角色用字符串 code 寻址，非数字 ID）。
+func roleCodeParam(c *gin.Context) (string, error) {
+	code := strings.TrimSpace(c.Param("id"))
+	if code == "" {
+		return "", apperr.NewAppError(apperr.ErrRoleNotFound, "角色不存在", 404)
+	}
+	return code, nil
+}
+
+func (h *StaffHandler) getRole(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
+	code, err := roleCodeParam(c)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	r, err := h.svc.GetRole(c.Request.Context(), brandID, actorID, code)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, r)
+}
+
+// createRoleBody POST /roles 请求体。
+// permission_codes 不加 omitempty：handler 收 []string，允许空数组（Batch 5 坑）。
+type createRoleBody struct {
+	Name            string   `json:"name"`
+	ScopeType       string   `json:"scope_type"`
+	Description     string   `json:"description"`
+	PermissionCodes []string `json:"permission_codes"`
+}
+
+func (h *StaffHandler) createRole(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
+	var body createRoleBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
+		return
+	}
+	if body.PermissionCodes == nil {
+		body.PermissionCodes = []string{}
+	}
+	r, err := h.svc.CreateRole(c.Request.Context(), appStaff.CreateRoleInput{
+		BrandID:         brandID,
+		ActorID:         actorID,
+		Name:            body.Name,
+		ScopeType:       body.ScopeType,
+		Description:     body.Description,
+		PermissionCodes: body.PermissionCodes,
+	})
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"code": "OK", "message": "created", "data": r})
+}
+
+// updateRoleBody PUT /roles/:code 请求体。无 scope_type（A3 不可改）。
+type updateRoleBody struct {
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	PermissionCodes []string `json:"permission_codes"`
+}
+
+func (h *StaffHandler) updateRole(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
+	code, err := roleCodeParam(c)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	var body updateRoleBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
+		return
+	}
+	if body.PermissionCodes == nil {
+		body.PermissionCodes = []string{}
+	}
+	r, err := h.svc.UpdateRole(c.Request.Context(), appStaff.UpdateRoleInput{
+		BrandID:         brandID,
+		ActorID:         actorID,
+		Code:            code,
+		Name:            body.Name,
+		Description:     body.Description,
+		PermissionCodes: body.PermissionCodes,
+	})
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, r)
+}
+
+type patchRoleStatusBody struct {
+	Status string `json:"status"`
+}
+
+func (h *StaffHandler) patchRoleStatus(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
+	code, err := roleCodeParam(c)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	var body patchRoleStatusBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
+		return
+	}
+	r, err := h.svc.PatchRoleStatus(c.Request.Context(), brandID, actorID, code, body.Status)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, r)
+}
+
+func (h *StaffHandler) deleteRole(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
+	code, err := roleCodeParam(c)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	if err := h.svc.DeleteRole(c.Request.Context(), brandID, actorID, code); err != nil {
+		response.Error(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// permissionGroupResponse GET /permissions 按 domain 分组的响应单元。
+type permissionGroupResponse struct {
+	Domain      string                   `json:"domain"`
+	Permissions []permissionItemResponse `json:"permissions"`
+}
+
+type permissionItemResponse struct {
+	Code        string `json:"code"`
+	Action      string `json:"action"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+func (h *StaffHandler) listPermissions(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
+	perms, err := h.svc.ListPermissions(c.Request.Context(), brandID, actorID)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, groupPermissionsByDomain(perms))
+}
+
+// groupPermissionsByDomain 把扁平权限列表按 domain 分组，保持 service 已排好的
+// domain/code 顺序（service ListPermissions 已 ORDER BY domain, code）。
+func groupPermissionsByDomain(perms []role.Permission) []permissionGroupResponse {
+	groups := make([]permissionGroupResponse, 0)
+	idx := map[string]int{}
+	for _, p := range perms {
+		i, ok := idx[p.Domain]
+		if !ok {
+			groups = append(groups, permissionGroupResponse{Domain: p.Domain})
+			i = len(groups) - 1
+			idx[p.Domain] = i
+		}
+		groups[i].Permissions = append(groups[i].Permissions, permissionItemResponse{
+			Code:        p.Code,
+			Action:      p.Action,
+			Name:        p.Name,
+			Description: p.Description,
+		})
+	}
+	return groups
 }
 
 func parseStaffID(c *gin.Context) (int64, error) {
