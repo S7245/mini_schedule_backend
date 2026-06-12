@@ -56,6 +56,9 @@ const (
 	ErrLocationNotFound       ErrorCode = "LOCATION_NOT_FOUND"
 	ErrQuotaExceeded          ErrorCode = "QUOTA_EXCEEDED"
 	ErrSubscriptionRestricted ErrorCode = "SUBSCRIPTION_RESTRICTED"
+	// Batch 9 — 门店删除引用保护
+	// ErrLocationInUse (HTTP 409)：删除门店时仍有 active 员工任职或门店级角色任职引用（镜像 Batch 7 ErrRoleInUse）。
+	ErrLocationInUse ErrorCode = "LOCATION_IN_USE"
 
 	// Batch 5 — Staff / Role / Instructor
 	ErrStaffPhoneDuplicated      ErrorCode = "STAFF_PHONE_DUPLICATED"
