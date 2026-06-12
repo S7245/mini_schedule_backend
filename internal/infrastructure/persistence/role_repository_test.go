@@ -173,7 +173,7 @@ func TestCreateBrandRole_DuplicateCodeMapsToRoleCodeDuplicated(t *testing.T) {
 	err := repo.db.Transaction(func(tx *gorm.DB) error {
 		row := BrandRoleModel{BrandID: brandID, Code: "custom_collide", Name: "x", ScopeType: "brand", IsSystem: false, Status: "active"}
 		if e := tx.Create(&row).Error; e != nil {
-			if isUniqueViolationPG(e) {
+			if isUniqueViolation(e) {
 				return apperr.NewAppError(apperr.ErrRoleCodeDuplicated, "角色 code 冲突，请重试", 409)
 			}
 			return e

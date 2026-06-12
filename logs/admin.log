@@ -1,6 +1,6 @@
-time=2026-06-11T17:01:04.409+08:00 level=INFO msg="migrations: schema up to date" version=5
-time=2026-06-11T17:01:04.415+08:00 level=INFO msg="database connected" host=127.0.0.1 port=5432 dbname=mini_schedule
-time=2026-06-11T17:01:04.418+08:00 level=INFO msg="redis connected" addr=127.0.0.1:6379
+time=2026-06-12T11:05:11.780+08:00 level=INFO msg="migrations: applied" from_version=5 to_version=6
+time=2026-06-12T11:05:11.787+08:00 level=INFO msg="database connected" host=127.0.0.1 port=5432 dbname=mini_schedule
+time=2026-06-12T11:05:11.795+08:00 level=INFO msg="redis connected" addr=127.0.0.1:6379
 [GIN-debug] [WARNING] Running in "debug" mode. Switch to "release" mode in production.
  - using env:	export GIN_MODE=release
  - using code:	gin.SetMode(gin.ReleaseMode)
@@ -37,6 +37,4 @@ time=2026-06-11T17:01:04.418+08:00 level=INFO msg="redis connected" addr=127.0.0
 [GIN-debug] GET    /api/v1/admin/payment-callback-logs --> github.com/zkw/mini-schedule/backend/internal/interfaces/admin.(*Handler).listPaymentCallbackLogs-fm (5 handlers)
 [GIN-debug] GET    /api/v1/admin/operation-logs --> github.com/zkw/mini-schedule/backend/internal/interfaces/admin.(*Handler).listOperationLogs-fm (5 handlers)
 [GIN-debug] POST   /api/v1/admin/system/backfill-owner-roles --> github.com/zkw/mini-schedule/backend/internal/interfaces/admin.(*SystemHandler).backfillOwnerRoles-fm (5 handlers)
-time=2026-06-11T17:01:04.419+08:00 level=INFO msg="admin server starting" addr=:8083
-time=2026-06-11T17:25:12.901+08:00 level=INFO msg="admin server shutting down..."
-time=2026-06-11T17:25:12.902+08:00 level=INFO msg="admin server exited"
+time=2026-06-12T11:05:11.798+08:00 level=INFO msg="admin server starting" addr=:8083

@@ -2,11 +2,14 @@ package persistence
 
 import (
 	"context"
+	"errors"
+	"strings"
 
-	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
-	"github.com/zkw/mini-schedule/backend/internal/domain/user"
-
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
+
+	"github.com/zkw/mini-schedule/backend/internal/domain/user"
+	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
 
 type appUserRepository struct {
@@ -298,21 +301,21 @@ func toAdminUserDomain(m *AdminUserModel) *user.AdminUser {
 	}
 }
 
-// isUniqueViolation 判断是否为 PostgreSQL 唯一约束冲突
+// isUniqueViolation 判断是否为 PostgreSQL 唯一约束冲突。
+// 首选 pgconn.PgError code 23505（pgx 驱动下最可靠）；旧的错误字符串匹配作为兜底，
+// 但 pgx 的 message 形如 `... (SQLSTATE 23505)`，既无 "ERROR: " 前缀也不以 "duplicates"
+// 结尾，纯字符串前缀判断会漏判（曾导致手机号重复时返 500 而非业务错误），故必须走 code。
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false
 	}
-	// GORM 包装后的唯一约束错误
-	return err.Error() != "" && (containsUniqueConstraint(err) || isPGUniqueViolation(err))
-}
-
-func containsUniqueConstraint(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	// 兜底：极少数未包装成 pgconn.PgError 的路径，按 message 关键字宽松匹配。
 	msg := err.Error()
-	return len(msg) > 0 && (msg[len(msg)-10:] == "duplicates" || len(msg) > 27 && msg[:27] == "ERROR: duplicate key value")
-}
-
-func isPGUniqueViolation(err error) bool {
-	msg := err.Error()
-	return len(msg) > 0 && (msg[len(msg)-10:] == "duplicates" || len(msg) > 27 && msg[:27] == "ERROR: duplicate key value")
+	return strings.Contains(msg, "SQLSTATE 23505") ||
+		strings.Contains(msg, "duplicate key value") ||
+		strings.HasSuffix(msg, "duplicates")
 }

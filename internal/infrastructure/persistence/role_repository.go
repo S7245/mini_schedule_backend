@@ -6,23 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/zkw/mini-schedule/backend/internal/audit"
 	"github.com/zkw/mini-schedule/backend/internal/domain/role"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
-
-// isUniqueViolationPG 用 pgconn.PgError code 23505 判定唯一约束冲突，
-// 比基于错误字符串前缀的 isUniqueViolation 更可靠（后者对部分 message 格式漏判）。
-func isUniqueViolationPG(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return pgErr.Code == "23505"
-	}
-	return false
-}
 
 type roleRepository struct {
 	db *gorm.DB
@@ -243,7 +232,7 @@ func (r *roleRepository) CreateBrandRole(ctx context.Context, in role.CreateBran
 			 VALUES (?, ?, ?, ?, FALSE, 'active', ?) RETURNING id`,
 			in.BrandID, code, in.Name, in.ScopeType, in.Description,
 		).Scan(&newRoleID).Error; err != nil {
-			if isUniqueViolationPG(err) {
+			if isUniqueViolation(err) {
 				return apperr.NewAppError(apperr.ErrRoleCodeDuplicated, "角色 code 冲突，请重试", 409)
 			}
 			return apperr.ErrInternalF("创建角色失败", err)

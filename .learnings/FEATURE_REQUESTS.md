@@ -48,3 +48,14 @@
 - **GET /permissions 全量权限列表**：自定义角色编辑器需要一份"所有可分配 permission code + 中文名 + 分组（域）"的元数据列表给前端勾选。SoT 是 permissions 表，加一个只读 endpoint 即可。
 - **品牌自定义角色 / 调整权限 CRUD**：Batch 5 只 seed 了 8 个预置 role_templates → brand_roles；品牌后台自建角色、改角色权限、删角色的完整 CRUD 仍未做（Batch 5/6 两次列入，是 Batch 7 主线）。
 - **T10 完整回归未自动跑**：Batch 6 的 35 个测试场景（H1-H6 happy path + E1-E35 edge）只做了人工抽样验收，未生成端到端 Playwright/集成测试。建议 Batch 7 起飞前补关键路径（权限拒绝 403、data_scope 越权 404、owner fast-path）的自动化覆盖。
+
+## 2026-06-12 Batch 7 code-review 转移项
+
+Batch 7（自定义角色 CRUD）post-impl code-review 中，2 项已当批修掉（commit `0950200`：role 响应补 Permission.Description；DeleteRole 计数改 status-agnostic + 删死代码）。以下转后续清债：
+
+- **共享 `isUniqueViolation` 真有 bug（8 个 repo 受影响，P1）**：`user_repository.go:302-318` 的 `containsUniqueConstraint` 与 `isPGUniqueViolation` 是逐字节相同的复制（"PG" 变体名不副实，根本没调 `errors.As`/pgconn），且靠英文前缀 `msg[:27] == "ERROR: duplicate key value"` 匹配（locale/格式脆弱），`msg[len(msg)-10:]` 对短于 10 字节的错误串会 panic（仅 `len(msg)>0` 守卫）。Batch 7 在 `role_repository.go` 新增了正确的 `isUniqueViolationPG`（pgconn code 23505）绕开它，但其余 instructor/staff/user/brand/location/commercial/brand_extension 8 处仍走旧的脆弱实现。建议：抽 `pkg/pgerr.IsUniqueViolation(err)` 用 `errors.As(*pgconn.PgError)` + `SQLSTATE==23505`，全量替换并删掉旧 helper。
+- **`GetRole` 双查（效率）**：`service.go:GetRole` 先 `GetBrandRoleByCode` 再 `ListBrandRoles(brandID)` 全量拉所有角色 + JOIN 全部权限，只为线性扫出单条的 permissions。`role_repository.go` 已有 `getBrandRoleByIDWithPermissions` 做的正是单角色+权限，但未导出。建议导出/加接口方法，`GetRole` 直接按 ID 取，省掉 O(N) 扫描。
+- **角色缓存批量失效是逐 key DEL（效率）**：`invalidateRoleHolders` 拿到全部 holder id 后逐个 `checker.Invalidate` → 单 key Redis DEL 往返。改 widely-assigned 角色（如 200 员工）会在请求路径上打 200 次串行 DEL。建议 `checker` 暴露 `InvalidateMany([]int64)`，一次多 key DEL / pipeline。
+- **`resolvePermissionIDs` 拒绝 inactive code（潜在）**：全量替换权限时若回传的 code 里含已 `status=inactive` 的权限，整批被拒（连改名也存不了）。当前无任何流程会把 14+1 个 permission 置 inactive，故不可达；若将来引入权限下线流程需重审：编辑既有角色时对"已存在于该角色、但现已 inactive"的 code 应放行而非拒绝。
+- **`/roles/:id` 路由参数名语义误导（可维护性）**：role 路由注册为 `:id` 但 handler 按字符串 code 解析（`c.Param("id")`），而同 handler 的 `/staff/:id` 是数字 ID（`ParseInt`）。同名参数两种含义，易被后人 copy 错。建议 role 路由段改名 `:code` 自文档化（注意 Gin 同前缀冲突规则，`/roles/*` 与 `/staff/*` 前缀不同，可安全改名）。
+- **`brand_owner`/`is_system` 保护检查散落（altitude）**：`resolveRoleAssignments`、`ReplaceRoleAssignments`、`requireMutableCustomRole` 各自硬编码 `code == "brand_owner"` 字面量（3+ 处）+ 重复 `IsSystem` 判断。建议在 `role.BrandRole` 上收敛为 `IsProtected()` / `IsMutable()` 谓词，单点维护这条安全不变量（注释已自承"security-critical"）。
