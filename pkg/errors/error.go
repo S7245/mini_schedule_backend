@@ -71,6 +71,17 @@ const (
 	// ErrPermissionDenied (HTTP 403)：service 层 RequirePermission 失败时返回，
 	// Details 含 {required: "<code>", missing: ["<code>"]} 方便前端 toast + 排错。
 	ErrPermissionDenied ErrorCode = "PERMISSION_DENIED"
+
+	// Batch 7 — 品牌自定义角色 CRUD
+	// ErrRoleIsSystem (HTTP 409)：试图改 / 删 is_system=TRUE 的系统角色。
+	ErrRoleIsSystem ErrorCode = "ROLE_IS_SYSTEM"
+	// ErrRoleInUse (HTTP 409)：删除时仍有 active 任职引用该角色（A4）。
+	ErrRoleInUse ErrorCode = "ROLE_IN_USE"
+	// ErrRolePermissionExceedsActor (HTTP 403)：创建 / 编辑角色时勾选的权限超出
+	// actor 自身有效权限集（B1，非 owner）。
+	ErrRolePermissionExceedsActor ErrorCode = "ROLE_PERMISSION_EXCEEDS_ACTOR"
+	// ErrRoleCodeDuplicated (HTTP 409)：(brand_id, code) 冲突兜底（D3）。
+	ErrRoleCodeDuplicated ErrorCode = "ROLE_CODE_DUPLICATED"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码
