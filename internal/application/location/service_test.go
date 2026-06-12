@@ -28,6 +28,10 @@ type fakeRepo struct {
 
 	createCalled bool
 	createIn     domainlocation.CreateLocationInput
+
+	refCount    int64
+	refErr      error
+	delCalled   bool
 }
 
 func (f *fakeRepo) Create(_ context.Context, in domainlocation.CreateLocationInput) (*domainlocation.Location, error) {
@@ -56,7 +60,12 @@ func (f *fakeRepo) UpdateStatus(_ context.Context, _, _, _ int64, _ domainlocati
 }
 
 func (f *fakeRepo) SoftDelete(_ context.Context, _, _, _ int64) error {
+	f.delCalled = true
 	return f.delErr
+}
+
+func (f *fakeRepo) CountActiveReferences(_ context.Context, _, _ int64) (int64, error) {
+	return f.refCount, f.refErr
 }
 
 func TestCreate_EmptyName(t *testing.T) {
@@ -164,6 +173,51 @@ func TestDelete_NotFoundPropagates(t *testing.T) {
 	}
 	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrLocationNotFound {
 		t.Errorf("expected LOCATION_NOT_FOUND, got %v", err)
+	}
+}
+
+// BE-1/BE-2: location with active references → Delete returns LOCATION_IN_USE
+// and SoftDelete is NOT called. (Service guard is reference-source agnostic;
+// repo sums staff + role assignments — see CountActiveReferences DB test.)
+func TestDelete_InUseRejected(t *testing.T) {
+	repo := &fakeRepo{refCount: 1}
+	svc := NewService(repo, nil)
+	err := svc.Delete(context.Background(), 1, 7, 42)
+	if err == nil {
+		t.Fatal("expected LOCATION_IN_USE error")
+	}
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrLocationInUse {
+		t.Fatalf("expected LOCATION_IN_USE, got %v", err)
+	}
+	if ae := apperr.GetAppError(err); ae != nil && ae.HTTPStatus != 409 {
+		t.Errorf("expected HTTP 409, got %d", ae.HTTPStatus)
+	}
+	if repo.delCalled {
+		t.Errorf("SoftDelete must NOT be called when references exist")
+	}
+}
+
+// BE-3: location with no references → Delete proceeds (SoftDelete called).
+func TestDelete_NoReferencesProceeds(t *testing.T) {
+	repo := &fakeRepo{refCount: 0}
+	svc := NewService(repo, nil)
+	if err := svc.Delete(context.Background(), 1, 7, 42); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !repo.delCalled {
+		t.Errorf("expected SoftDelete to be called when no references")
+	}
+}
+
+// CountActiveReferences error propagates and blocks the delete.
+func TestDelete_RefCountErrorPropagates(t *testing.T) {
+	repo := &fakeRepo{refErr: errors.New("db down")}
+	svc := NewService(repo, nil)
+	if err := svc.Delete(context.Background(), 1, 7, 42); err == nil {
+		t.Fatal("expected error from CountActiveReferences")
+	}
+	if repo.delCalled {
+		t.Errorf("SoftDelete must NOT be called when ref count errors")
 	}
 }
 
