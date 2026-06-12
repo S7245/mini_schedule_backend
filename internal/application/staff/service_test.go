@@ -115,7 +115,7 @@ func (f *fakeRoleRepo) DeleteBrandRole(_ context.Context, _, _, roleID int64) er
 	f.deleteSeen = roleID
 	return f.deleteErr
 }
-func (f *fakeRoleRepo) CountActiveAssignmentsByRole(_ context.Context, _ int64) (int64, error) {
+func (f *fakeRoleRepo) CountAssignmentsByRole(_ context.Context, _ int64) (int64, error) {
 	return f.activeAssignments, f.activeAssignErr
 }
 func (f *fakeRoleRepo) ListBrandUserIDsByRole(_ context.Context, _ int64) ([]int64, error) {

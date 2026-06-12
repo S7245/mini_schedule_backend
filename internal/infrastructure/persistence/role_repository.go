@@ -379,12 +379,14 @@ func (r *roleRepository) DeleteBrandRole(ctx context.Context, brandID, actorID, 
 	})
 }
 
-// CountActiveAssignmentsByRole 统计仍引用该 role 的 active 任职数（A4 删除前置校验）。
-func (r *roleRepository) CountActiveAssignmentsByRole(ctx context.Context, roleID int64) (int64, error) {
+// CountAssignmentsByRole 统计仍引用该 role 的任职数（任意 status）——A4 删除前置校验。
+// 不限 status：role_id 外键是 ON DELETE CASCADE，任何残留任职行（含将来可能引入的
+// inactive 软删行）被硬删都会被静默级联抹除，因此只要存在引用就拒删，避免数据丢失。
+func (r *roleRepository) CountAssignmentsByRole(ctx context.Context, roleID int64) (int64, error) {
 	var count int64
 	if err := r.db.WithContext(ctx).
 		Model(&BrandUserRoleAssignmentModel{}).
-		Where("role_id = ? AND status = ?", roleID, "active").
+		Where("role_id = ?", roleID).
 		Count(&count).Error; err != nil {
 		return 0, apperr.ErrInternalF("统计角色任职引用失败", err)
 	}
@@ -452,12 +454,13 @@ func (r *roleRepository) getBrandRoleByIDWithPermissions(ctx context.Context, br
 	out := make([]role.Permission, 0, len(perms))
 	for _, p := range perms {
 		out = append(out, role.Permission{
-			ID:     p.PermissionModel.ID,
-			Code:   p.PermissionModel.Code,
-			Domain: p.PermissionModel.Domain,
-			Action: p.PermissionModel.Action,
-			Name:   p.PermissionModel.Name,
-			Status: p.PermissionModel.Status,
+			ID:          p.PermissionModel.ID,
+			Code:        p.PermissionModel.Code,
+			Domain:      p.PermissionModel.Domain,
+			Action:      p.PermissionModel.Action,
+			Name:        p.PermissionModel.Name,
+			Description: p.PermissionModel.Description,
+			Status:      p.PermissionModel.Status,
 		})
 	}
 	return toBrandRoleDomain(&m, out), nil

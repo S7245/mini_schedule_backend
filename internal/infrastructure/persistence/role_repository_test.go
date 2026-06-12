@@ -198,7 +198,7 @@ func TestCountAndListBrandUserIDsByRole(t *testing.T) {
 	}
 
 	// No assignments yet.
-	n, err := repo.CountActiveAssignmentsByRole(context.Background(), created.ID)
+	n, err := repo.CountAssignmentsByRole(context.Background(), created.ID)
 	if err != nil || n != 0 {
 		t.Fatalf("count = %d err = %v, want 0", n, err)
 	}
@@ -224,7 +224,7 @@ func TestCountAndListBrandUserIDsByRole(t *testing.T) {
 		t.Fatalf("seed assignment: %v", err)
 	}
 
-	n, err = repo.CountActiveAssignmentsByRole(context.Background(), created.ID)
+	n, err = repo.CountAssignmentsByRole(context.Background(), created.ID)
 	if err != nil || n != 1 {
 		t.Fatalf("count = %d err = %v, want 1", n, err)
 	}

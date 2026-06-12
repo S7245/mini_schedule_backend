@@ -9,7 +9,7 @@
 > ```json
 > {
 >   "code": "OK",           // 业务错误码，"OK" 表示成功
->   "message": "success",   // 提示消息
+>   "message": "成功",      // 提示消息，会按请求语言返回
 >   "data": { ... }         // 业务数据
 > }
 > ```
@@ -18,7 +18,7 @@
 > ```json
 > {
 >   "code": "OK",
->   "message": "success",
+>   "message": "成功",
 >   "data": {
 >     "items": [],
 >     "total": 100,
@@ -32,6 +32,13 @@
 > **认证方式**
 > - 所有受保护接口需要在 Header 中携带 `Authorization: Bearer <access_token>`
 > - 未认证返回: `401 {"code": "UNAUTHORIZED", "message": "缺少认证令牌"}`
+
+> **国际化**
+> - 默认语言: `zh-CN`
+> - 当前支持: `zh-CN`, `en-US`
+> - 语言识别优先级: `?lang=` / `?locale=` → `X-Language` → `X-Locale` → `Accept-Language`
+> - 响应会返回 `Content-Language`
+> - 例: `Accept-Language: en-US` 时，未认证返回 `401 {"code": "UNAUTHORIZED", "message": "missing authentication token"}`
 
 ---
 

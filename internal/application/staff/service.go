@@ -707,23 +707,15 @@ func (s *Service) DeleteRole(ctx context.Context, brandID, actorID int64, code s
 	if err != nil {
 		return err
 	}
-	count, err := s.roleRepo.CountActiveAssignmentsByRole(ctx, target.ID)
+	count, err := s.roleRepo.CountAssignmentsByRole(ctx, target.ID)
 	if err != nil {
 		return err
 	}
 	if count > 0 {
 		return apperr.NewAppError(apperr.ErrRoleInUse, "该角色仍有员工任职，请先移除", 409)
 	}
-	// 删前先取持有人（删后任职行可能被外键级联，反查不到）——本场景 count==0 故为空，
-	// 但保持对称：仍调用以兜底（例如非 active 任职）。
-	holders, _ := s.roleRepo.ListBrandUserIDsByRole(ctx, target.ID)
-	if err := s.roleRepo.DeleteBrandRole(ctx, brandID, actorID, target.ID); err != nil {
-		return err
-	}
-	for _, uid := range holders {
-		_ = s.invalidateUser(ctx, uid)
-	}
-	return nil
+	// 走到这里 count==0：无任职引用 → 无缓存持有人，删后无需失效任何用户缓存。
+	return s.roleRepo.DeleteBrandRole(ctx, brandID, actorID, target.ID)
 }
 
 // requireMutableCustomRole 取角色并拦截系统角色 / owner 系统角色（A1/D2）。

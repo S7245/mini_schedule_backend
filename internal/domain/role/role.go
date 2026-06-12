@@ -101,6 +101,6 @@ type Repository interface {
 	UpdateBrandRole(ctx context.Context, in UpdateBrandRoleInput) (*BrandRole, error)
 	UpdateBrandRoleStatus(ctx context.Context, brandID, actorID, roleID int64, status string) (*BrandRole, error)
 	DeleteBrandRole(ctx context.Context, brandID, actorID, roleID int64) error
-	CountActiveAssignmentsByRole(ctx context.Context, roleID int64) (int64, error)
+	CountAssignmentsByRole(ctx context.Context, roleID int64) (int64, error)
 	ListBrandUserIDsByRole(ctx context.Context, roleID int64) ([]int64, error)
 }
