@@ -68,4 +68,7 @@ type Repository interface {
 	Update(ctx context.Context, brandID, id int64, input UpdateLocationInput) (*Location, error)
 	UpdateStatus(ctx context.Context, brandID, actorID, id int64, status Status) (*Location, error)
 	SoftDelete(ctx context.Context, brandID, actorID, id int64) error
+	// CountActiveReferences 统计阻止删除的 active 引用（员工任职 + 门店级角色任职），带 brand_id 隔离。
+	// Batch 9：删除门店前校验，>0 → LOCATION_IN_USE。
+	CountActiveReferences(ctx context.Context, brandID, locationID int64) (int64, error)
 }

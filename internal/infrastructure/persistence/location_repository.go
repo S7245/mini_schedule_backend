@@ -216,6 +216,33 @@ func (r *locationRepository) SoftDelete(ctx context.Context, brandID, actorID, i
 	})
 }
 
+// CountActiveReferences 统计阻止删除的 active 引用（员工任职 + 门店级角色任职），带 brand_id 隔离。
+//
+// 软删不触发 FK 行为，会留下指向已删门店的悬空引用，因此删除前先 COUNT：
+//   - staff_location_assignments WHERE location_id=? AND brand_id=? AND status='active'
+//   - brand_user_role_assignments WHERE location_id=? AND brand_id=? AND status='active'
+//
+// 两表都硬删重插（只存 active 行），filter active 语义直白；brand_id 防跨租户误计。
+func (r *locationRepository) CountActiveReferences(ctx context.Context, brandID, locationID int64) (int64, error) {
+	var staffCount int64
+	if err := r.db.WithContext(ctx).
+		Model(&StaffLocationAssignmentModel{}).
+		Where("location_id = ? AND brand_id = ? AND status = ?", locationID, brandID, "active").
+		Count(&staffCount).Error; err != nil {
+		return 0, apperr.ErrInternalF("统计门店员工任职引用失败", err)
+	}
+
+	var roleCount int64
+	if err := r.db.WithContext(ctx).
+		Model(&BrandUserRoleAssignmentModel{}).
+		Where("location_id = ? AND brand_id = ? AND status = ?", locationID, brandID, "active").
+		Count(&roleCount).Error; err != nil {
+		return 0, apperr.ErrInternalF("统计门店角色任职引用失败", err)
+	}
+
+	return staffCount + roleCount, nil
+}
+
 // writeLocationOperationLog 在事务内写一条门店生命周期 OperationLog。
 // 经 Batch 5 T02 后所有写入都走 audit.Write；actor_type 固定为 brand_user。
 func writeLocationOperationLog(tx *gorm.DB, brandID, actorID int64, action string, locationID int64, before, after *LocationModel) error {
