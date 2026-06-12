@@ -156,6 +156,49 @@ func TestUpdateRole_ScopeTypeNotChangeable(t *testing.T) {
 	}
 }
 
+// B1 (delta semantics): a non-owner actor editing a role that ALREADY contains a
+// permission the actor lacks can KEEP that permission — only newly-added perms are
+// checked against the actor. Here actor has only staff.view; the role already has
+// location.delete; resubmitting it (e.g. while renaming) must succeed.
+func TestUpdateRole_KeepingExistingExceedingPermAllowed(t *testing.T) {
+	rr := &fakeRoleRepo{
+		byCode:            map[string]*role.BrandRole{"custom_z": {ID: 20, Code: "custom_z", IsSystem: false, ScopeType: "brand"}},
+		existingPermCodes: []string{"location.delete"}, // role already grants this
+		updateOut:         &role.BrandRole{ID: 20, Code: "custom_z"},
+	}
+	sr := &fakeStaffRepo{getByID: &staff.Staff{ID: 9, IsOwner: false}}
+	ch := &fakePermissionChecker{resolveSet: domainrbac.Expand([]string{"staff.view"})} // actor lacks location.delete
+	svc := newSvcWithChecker(sr, rr, nil, ch)
+	_, err := svc.UpdateRole(context.Background(), UpdateRoleInput{
+		BrandID: 1, ActorID: 9, Code: "custom_z", Name: "改名",
+		PermissionCodes: []string{"location.delete"}, // kept, not newly added
+	})
+	if err != nil {
+		t.Fatalf("UpdateRole keeping existing exceeding perm: err = %v, want nil", err)
+	}
+}
+
+// B1 (delta semantics): ADDING a permission beyond the non-owner actor's set is
+// still rejected. Role currently has staff.view; actor (staff.view only) adds
+// staff.delete → ROLE_PERMISSION_EXCEEDS_ACTOR.
+func TestUpdateRole_AddingExceedingPermRejected(t *testing.T) {
+	rr := &fakeRoleRepo{
+		byCode:            map[string]*role.BrandRole{"custom_z": {ID: 20, Code: "custom_z", IsSystem: false, ScopeType: "brand"}},
+		existingPermCodes: []string{"staff.view"},
+		updateOut:         &role.BrandRole{ID: 20, Code: "custom_z"},
+	}
+	sr := &fakeStaffRepo{getByID: &staff.Staff{ID: 9, IsOwner: false}}
+	ch := &fakePermissionChecker{resolveSet: domainrbac.Expand([]string{"staff.view"})}
+	svc := newSvcWithChecker(sr, rr, nil, ch)
+	_, err := svc.UpdateRole(context.Background(), UpdateRoleInput{
+		BrandID: 1, ActorID: 9, Code: "custom_z", Name: "改名",
+		PermissionCodes: []string{"staff.view", "staff.delete"}, // staff.delete is newly added & beyond actor
+	})
+	if errCode(err) != apperr.ErrRolePermissionExceedsActor {
+		t.Fatalf("UpdateRole adding exceeding perm: err = %v, want ROLE_PERMISSION_EXCEEDS_ACTOR", err)
+	}
+}
+
 // E1: DeleteRole with active assignments → ROLE_IN_USE.
 func TestDeleteRole_InUse(t *testing.T) {
 	rr := &fakeRoleRepo{

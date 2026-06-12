@@ -659,7 +659,14 @@ func (s *Service) UpdateRole(ctx context.Context, in UpdateRoleInput) (*role.Bra
 	if err != nil {
 		return nil, err
 	}
-	if err := s.guardPermissionSubset(ctx, in.BrandID, in.ActorID, in.PermissionCodes); err != nil {
+	// B1（增量语义）：只对"新增"的权限做 ⊆ actor 校验；角色原有的权限可保留/移除，
+	// 不因 actor 自身缺该权限而被拦——既守住"不能授予自己没有的权限"的提权防线，
+	// 又不让受限管理员连改名都被卡死。create 全是新增，故仍走全集校验。
+	existing, err := s.roleRepo.ListRolePermissionCodes(ctx, target.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.guardPermissionSubset(ctx, in.BrandID, in.ActorID, addedCodes(in.PermissionCodes, existing)); err != nil {
 		return nil, err
 	}
 	updated, err := s.roleRepo.UpdateBrandRole(ctx, role.UpdateBrandRoleInput{
@@ -731,6 +738,21 @@ func (s *Service) requireMutableCustomRole(ctx context.Context, brandID int64, c
 		return nil, apperr.NewAppError(apperr.ErrRoleIsSystem, "系统角色只读，不可修改或删除", 409)
 	}
 	return br, nil
+}
+
+// addedCodes 返回 want 中不在 have 里的 code（即本次新增的权限）。
+func addedCodes(want, have []string) []string {
+	existing := make(map[string]struct{}, len(have))
+	for _, c := range have {
+		existing[c] = struct{}{}
+	}
+	added := make([]string, 0)
+	for _, c := range want {
+		if _, ok := existing[c]; !ok {
+			added = append(added, c)
+		}
+	}
+	return added
 }
 
 // guardPermissionSubset B1：非 owner 时勾选权限必须 ⊆ actor 有效权限集。

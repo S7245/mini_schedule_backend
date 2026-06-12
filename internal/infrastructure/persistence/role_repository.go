@@ -396,6 +396,20 @@ func (r *roleRepository) ListBrandUserIDsByRole(ctx context.Context, roleID int6
 	return ids, nil
 }
 
+// ListRolePermissionCodes 返回该角色当前已落库的原始权限 code（未展开），
+// 供 UpdateRole 的增量提权校验（B1）：只对"新增"的 code 校验 actor 权限。
+func (r *roleRepository) ListRolePermissionCodes(ctx context.Context, roleID int64) ([]string, error) {
+	var codes []string
+	if err := r.db.WithContext(ctx).
+		Table("brand_role_permissions AS brp").
+		Joins("JOIN permissions p ON p.id = brp.permission_id").
+		Where("brp.role_id = ?", roleID).
+		Pluck("p.code", &codes).Error; err != nil {
+		return nil, apperr.ErrInternalF("查询角色现有权限失败", err)
+	}
+	return codes, nil
+}
+
 // insertBrandRolePermissions 批量插 brand_role_permissions（permIDs 已去重 / 已解析）。
 func insertBrandRolePermissions(tx *gorm.DB, brandID, roleID int64, permIDs []int64) error {
 	if len(permIDs) == 0 {

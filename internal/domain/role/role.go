@@ -103,4 +103,6 @@ type Repository interface {
 	DeleteBrandRole(ctx context.Context, brandID, actorID, roleID int64) error
 	CountAssignmentsByRole(ctx context.Context, roleID int64) (int64, error)
 	ListBrandUserIDsByRole(ctx context.Context, roleID int64) ([]int64, error)
+	// ListRolePermissionCodes 返回该角色当前已落库的原始权限 code 集合（B1 增量提权校验用）。
+	ListRolePermissionCodes(ctx context.Context, roleID int64) ([]string, error)
 }

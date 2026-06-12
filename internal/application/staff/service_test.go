@@ -94,6 +94,8 @@ type fakeRoleRepo struct {
 	activeAssignErr   error
 	userIDsByRole     []int64
 	userIDsErr        error
+	existingPermCodes []string
+	existingPermErr   error
 }
 
 func (f *fakeRoleRepo) ListPermissions(_ context.Context) ([]role.Permission, error) {
@@ -120,6 +122,9 @@ func (f *fakeRoleRepo) CountAssignmentsByRole(_ context.Context, _ int64) (int64
 }
 func (f *fakeRoleRepo) ListBrandUserIDsByRole(_ context.Context, _ int64) ([]int64, error) {
 	return f.userIDsByRole, f.userIDsErr
+}
+func (f *fakeRoleRepo) ListRolePermissionCodes(_ context.Context, _ int64) ([]string, error) {
+	return f.existingPermCodes, f.existingPermErr
 }
 
 func (f *fakeRoleRepo) ListBrandRoles(_ context.Context, _ int64) ([]*role.BrandRole, error) {
