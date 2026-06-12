@@ -66,9 +66,40 @@ type RoleTemplate struct {
 	Permissions []Permission `json:"permissions,omitempty"`
 }
 
+// CreateBrandRoleInput 新建自定义角色入参（Batch 7）。
+// PermissionCodes 存原始勾选（不展开）；repo 负责把 code 解析成 permission_id。
+type CreateBrandRoleInput struct {
+	BrandID         int64
+	ActorID         int64
+	Name            string
+	ScopeType       string
+	Description     string
+	PermissionCodes []string
+}
+
+// UpdateBrandRoleInput 编辑自定义角色入参（Batch 7）。
+// scope_type 不可改（A3），故不在入参里。PermissionCodes 全量替换。
+type UpdateBrandRoleInput struct {
+	BrandID         int64
+	ActorID         int64
+	RoleID          int64
+	Name            string
+	Description     string
+	PermissionCodes []string
+}
+
 // Repository 角色 / 权限查询接口。
 type Repository interface {
 	ListBrandRoles(ctx context.Context, brandID int64) ([]*BrandRole, error)
 	GetBrandRoleByCode(ctx context.Context, brandID int64, code string) (*BrandRole, error)
 	ListRoleTemplatesWithPermissions(ctx context.Context) ([]*RoleTemplate, error)
+
+	// Batch 7 — 自定义角色 CRUD。
+	ListPermissions(ctx context.Context) ([]Permission, error)
+	CreateBrandRole(ctx context.Context, in CreateBrandRoleInput) (*BrandRole, error)
+	UpdateBrandRole(ctx context.Context, in UpdateBrandRoleInput) (*BrandRole, error)
+	UpdateBrandRoleStatus(ctx context.Context, brandID, actorID, roleID int64, status string) (*BrandRole, error)
+	DeleteBrandRole(ctx context.Context, brandID, actorID, roleID int64) error
+	CountActiveAssignmentsByRole(ctx context.Context, roleID int64) (int64, error)
+	ListBrandUserIDsByRole(ctx context.Context, roleID int64) ([]int64, error)
 }

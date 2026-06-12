@@ -75,6 +75,51 @@ type fakeRoleRepo struct {
 	byCode    map[string]*role.BrandRole
 	byCodeErr error
 	templates []*role.RoleTemplate
+
+	// Batch 7 — custom role CRUD fakes.
+	permissions       []role.Permission
+	permissionsErr    error
+	createIn          *role.CreateBrandRoleInput
+	createOut         *role.BrandRole
+	createErr         error
+	updateIn          *role.UpdateBrandRoleInput
+	updateOut         *role.BrandRole
+	updateErr         error
+	statusOut         *role.BrandRole
+	statusErr         error
+	statusSeen        string
+	deleteErr         error
+	deleteSeen        int64
+	activeAssignments int64
+	activeAssignErr   error
+	userIDsByRole     []int64
+	userIDsErr        error
+}
+
+func (f *fakeRoleRepo) ListPermissions(_ context.Context) ([]role.Permission, error) {
+	return f.permissions, f.permissionsErr
+}
+func (f *fakeRoleRepo) CreateBrandRole(_ context.Context, in role.CreateBrandRoleInput) (*role.BrandRole, error) {
+	f.createIn = &in
+	return f.createOut, f.createErr
+}
+func (f *fakeRoleRepo) UpdateBrandRole(_ context.Context, in role.UpdateBrandRoleInput) (*role.BrandRole, error) {
+	f.updateIn = &in
+	return f.updateOut, f.updateErr
+}
+func (f *fakeRoleRepo) UpdateBrandRoleStatus(_ context.Context, _, _, _ int64, status string) (*role.BrandRole, error) {
+	f.statusSeen = status
+	return f.statusOut, f.statusErr
+}
+func (f *fakeRoleRepo) DeleteBrandRole(_ context.Context, _, _, roleID int64) error {
+	f.deleteSeen = roleID
+	return f.deleteErr
+}
+func (f *fakeRoleRepo) CountActiveAssignmentsByRole(_ context.Context, _ int64) (int64, error) {
+	return f.activeAssignments, f.activeAssignErr
+}
+func (f *fakeRoleRepo) ListBrandUserIDsByRole(_ context.Context, _ int64) ([]int64, error) {
+	return f.userIDsByRole, f.userIDsErr
 }
 
 func (f *fakeRoleRepo) ListBrandRoles(_ context.Context, _ int64) ([]*role.BrandRole, error) {
