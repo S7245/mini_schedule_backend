@@ -58,9 +58,13 @@ func validateCategories(tx *gorm.DB, brandID int64, ids []int64) error {
 
 // resolveLocationIDs 校验/默认化可用门店 id：
 //   - 传入非空：校验全部属本 brand active（未软删），不匹配 → INVALID_PARAM。
-//   - 传入空：返回当前 brand 全部 active 门店 id（默认全选）。
-func resolveLocationIDs(tx *gorm.DB, brandID int64, ids []int64) ([]int64, error) {
+//   - 传入空 + defaultAllWhenEmpty：返回当前 brand 全部 active 门店 id（创建时的默认全选）。
+//   - 传入空 + !defaultAllWhenEmpty：原样返回空（更新时尊重「清空」语义，不再回填全部）。
+func resolveLocationIDs(tx *gorm.DB, brandID int64, ids []int64, defaultAllWhenEmpty bool) ([]int64, error) {
 	if len(ids) == 0 {
+		if !defaultAllWhenEmpty {
+			return []int64{}, nil
+		}
 		var all []int64
 		if err := tx.Model(&LocationModel{}).
 			Where("brand_id = ? AND status = ?", brandID, "active").
@@ -88,7 +92,7 @@ func (r *courseTemplateRepository) Create(ctx context.Context, in coursetemplate
 		if err := validateCategories(tx, in.BrandID, categoryIDs); err != nil {
 			return err
 		}
-		locationIDs, err := resolveLocationIDs(tx, in.BrandID, dedupeInt64(in.LocationIDs))
+		locationIDs, err := resolveLocationIDs(tx, in.BrandID, dedupeInt64(in.LocationIDs), true)
 		if err != nil {
 			return err
 		}
@@ -337,7 +341,8 @@ func (r *courseTemplateRepository) Update(ctx context.Context, brandID, actorID,
 			}
 		}
 		if in.LocationIDs != nil {
-			locationIDs, err := resolveLocationIDs(tx, brandID, dedupeInt64(*in.LocationIDs))
+			// 更新时尊重显式「清空」：传入空切片 = 无可用门店，不再回填全部。
+			locationIDs, err := resolveLocationIDs(tx, brandID, dedupeInt64(*in.LocationIDs), false)
 			if err != nil {
 				return err
 			}
