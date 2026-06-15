@@ -1,6 +1,10 @@
 package persistence
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
 
 // CourseCategoryModel course_categories 表（Batch 11）。
 type CourseCategoryModel struct {
@@ -23,11 +27,11 @@ func (CourseCategoryModel) TableName() string { return "course_categories" }
 // 单独建模以承载新字段）。
 type CourseTemplateModel struct {
 	ID                int64      `gorm:"primaryKey;autoIncrement"`
-	CreatedAt         time.Time  `gorm:"column:created_at"`
-	UpdatedAt         time.Time  `gorm:"column:updated_at"`
-	DeletedAt         *time.Time `gorm:"column:deleted_at"`
-	BrandID           int64      `gorm:"column:brand_id"`
-	Title             string     `gorm:"column:title"`
+	CreatedAt         time.Time      `gorm:"column:created_at"`
+	UpdatedAt         time.Time      `gorm:"column:updated_at"`
+	DeletedAt         gorm.DeletedAt `gorm:"column:deleted_at;index"`
+	BrandID           int64          `gorm:"column:brand_id"`
+	Title             string         `gorm:"column:title"`
 	Description       string     `gorm:"column:description"`
 	CoverURL          string     `gorm:"column:cover_url"`
 	LevelLabel        string     `gorm:"column:level_label"`
