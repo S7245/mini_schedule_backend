@@ -68,3 +68,18 @@
 - **权限隐含在内存推导、不落库**（`domain/rbac/permission.go` `Expand`）：`X.edit→+X.view`、`X.create→+X.view`、`X.delete→+X.view +X.edit`。permission 表保持 normalized 只存原子 code，`Expand` 在 Resolve 返回前对 raw codes 做一次展开。好处：权限表不冗余、改隐含规则只动一处代码不用数据迁移。**注意**：缓存里存的是 raw codes（`cachedResolve.Codes`），`Expand` 在每次 Resolve 出口调用——所以改 Expand 规则立即对所有缓存生效，不用清 Redis。
 - **DataScope 合并语义集中在 `MergeScopes`**：多个 role assignment 的 scope 折叠规则——任一 all_brand → all_brand（清空 location_ids）；否则 union 所有 assigned_locations 的 ids；全 None → None；空输入 → None。`deriveScope`（rbac_repository.go）负责把 DB 的 `scope_type`(brand/location) × `data_scope`(role_default/all_brand/assigned_locations/own_sessions/own_records) 二维组合映射成 domain DataScope。`own_sessions`/`own_records` 本批 fallback 成 assigned_locations（至少不放成 all_brand），真正实现挂 FR。后续加 scope 维度先扩 `deriveScope` 的 switch。
 - **`LoadEffectiveRaw` 单条 SQL JOIN 五表取有效权限，避免 N+1**。`brand_user_role_assignments` JOIN `brand_roles`(status='active') LEFT JOIN `brand_role_permissions` LEFT JOIN `permissions`(status='active')，一次拉回所有 (role, scope, code) 行，再在 Go 里折叠去重 code + 按 role 聚合 scope。先用 tiny SELECT 确认 brand_user 存在（拿 is_owner），让 404 在大 JOIN 之前 surface。**约定**：role/permission 的 `status='active'` 过滤必须在 JOIN 的 ON 条件里，停用的角色/权限不能漏进有效集。
+
+## 2026-06-12 Batch 7 — 自定义角色 CRUD
+
+- **唯一约束冲突判定必须用 `pgconn.PgError` code，不要靠错误字符串**：pgx 驱动（gorm.io/driver/postgres）的唯一冲突错误串形如 `duplicate key value violates unique constraint "..." (SQLSTATE 23505)`——**无 `ERROR:` 前缀、不以 `duplicates` 结尾**。任何基于 `msg[:N]`/后缀的判断都会漏判，把业务级 409 降级成 500。正解：`var pgErr *pgconn.PgError; errors.As(err, &pgErr) && pgErr.Code == "23505"`。一个 helper `isUniqueViolation` 复用到所有 repo。
+- **提权防护用"增量校验"而非"全集校验"**（B1）：编辑角色时只对**新增**的 permission（不在角色现有集合里的）做 `⊆ actor 有效权限` 校验；保留/移除既有权限放行。否则受限管理员连"只改名"都被 `ROLE_PERMISSION_EXCEEDS_ACTOR` 卡死。owner（is_owner）整体跳过。实现：`ListRolePermissionCodes(roleID)` 取现有 → `addedCodes(want, existing)` diff → 只校验新增。create 全是新增故等价全集校验。
+- **删除带 `ON DELETE CASCADE` 外键的主行前，引用计数要 status-agnostic**：`brand_user_role_assignments.role_id` 是 CASCADE，删角色会连带抹掉任职行。删前置校验若只数 `status='active'`，残留 inactive 引用会被静默级联删除。改为数任意 status 的引用，有引用即拒删（`ROLE_IN_USE`）。
+- **缓存主动失效按"反查持有者"批量做**（C1）：改角色权限后，`ListBrandUserIDsByRole(roleID)` 反查全部持有者 → 逐个 `checker.Invalidate(uid)`（DEL `rbac:perms:<uid>`），post-commit 执行。验收实测 PUT 成功瞬间 Redis key 即被 DEL，不依赖 60s TTL。
+- **自定义角色 code 系统生成 + is_system 用 raw INSERT 写 FALSE**：GORM 会把 `false` 当零值省略，落到 DB `default:true`，导致自定义角色被误标系统角色。用 raw `INSERT ... is_system, FALSE ...`（与 role_allocator seeding 同模式）。
+- **新增系统级 permission 要 seed 模板 + backfill 存量 brand**：permissions 表是系统级，但每 brand 在注册时复制 role_templates→brand_roles。新增 `role.manage` 必须：① seed 到 role_templates（新 brand 自动有）② backfill 存量 brand 的 brand_roles（owner 走 fast-path 自动有，但 brand_admin 必须 backfill，否则存量 admin 看不到新功能）。
+
+## 2026-06-12 Batch 9 — 门店删除引用保护
+
+- **软删 + FK 行为的陷阱**：GORM 软删是 `UPDATE deleted_at`，**不触发任何 FK ON DELETE（CASCADE/RESTRICT/SET NULL 全不生效）**，会留下指向已软删行的悬空引用。凡是软删的主表，删除前必须 service 层显式查引用（COUNT > 0 → 409 IN_USE），不能指望 FK。镜像 Batch 7 A4。
+- **引用计数带 brand_id 隔离**：`CountActiveReferences(brandID, locationID)` 两个 COUNT 都带 `brand_id=?`，防跨租户同 id 误计（location_id 是全局自增，但租户边界要在 WHERE 显式带上）。
+- **只检查"当前真实有数据"的引用表**：12 张表带 location_id，但只 COUNT 当前有 CRUD/有数据的两张（staff_location_assignments + brand_user_role_assignments.location_id）；class_sessions/recurring_schedules schema 已建但无数据，纳入是空检查（违反"先抽象再找落点"）。等那批落地再加进同一 guard 方法。
