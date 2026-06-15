@@ -86,6 +86,23 @@ func (r *roleRepository) GetBrandRoleByCode(ctx context.Context, brandID int64, 
 	return toBrandRoleDomain(&m, nil), nil
 }
 
+// GetBrandRoleWithPermissions 按 (brand_id, code) 解析角色 id 后复用
+// getBrandRoleByIDWithPermissions 取单角色 + 其权限明细（替代 GetRole 旧路径里
+// "GetBrandRoleByCode + ListBrandRoles 全量扫描" 的 O(N) 浪费）。
+func (r *roleRepository) GetBrandRoleWithPermissions(ctx context.Context, brandID int64, code string) (*role.BrandRole, error) {
+	var m BrandRoleModel
+	if err := r.db.WithContext(ctx).
+		Select("id").
+		Where("brand_id = ? AND code = ?", brandID, code).
+		First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperr.NewAppError(apperr.ErrRoleNotFound, "角色不存在", 404)
+		}
+		return nil, apperr.ErrInternalF("查询角色失败", err)
+	}
+	return r.getBrandRoleByIDWithPermissions(ctx, brandID, m.ID)
+}
+
 func (r *roleRepository) ListRoleTemplatesWithPermissions(ctx context.Context) ([]*role.RoleTemplate, error) {
 	var templates []RoleTemplateModel
 	if err := r.db.WithContext(ctx).

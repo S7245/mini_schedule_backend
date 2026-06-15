@@ -93,6 +93,9 @@ type UpdateBrandRoleInput struct {
 type Repository interface {
 	ListBrandRoles(ctx context.Context, brandID int64) ([]*BrandRole, error)
 	GetBrandRoleByCode(ctx context.Context, brandID int64, code string) (*BrandRole, error)
+	// GetBrandRoleWithPermissions 按 (brand_id, code) 取单个角色 + 其权限明细，
+	// 不存在返回 ErrRoleNotFound（404）。比 GetBrandRoleByCode + ListBrandRoles 全量扫描省一次往返。
+	GetBrandRoleWithPermissions(ctx context.Context, brandID int64, code string) (*BrandRole, error)
 	ListRoleTemplatesWithPermissions(ctx context.Context) ([]*RoleTemplate, error)
 
 	// Batch 7 — 自定义角色 CRUD。

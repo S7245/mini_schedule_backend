@@ -566,23 +566,7 @@ func (s *Service) GetRole(ctx context.Context, brandID, actorID int64, code stri
 	if err := s.require(ctx, brandID, actorID, "staff.view"); err != nil {
 		return nil, err
 	}
-	br, err := s.roleRepo.GetBrandRoleByCode(ctx, brandID, code)
-	if err != nil {
-		return nil, err
-	}
-	// Fetch permissions for this role via the list path; cheap because we know
-	// the single role's permission set is loaded eagerly by ListBrandRoles, but
-	// we don't have a single-role-with-perms accessor. Refetch via list filter.
-	roles, err := s.roleRepo.ListBrandRoles(ctx, brandID)
-	if err != nil {
-		return br, nil
-	}
-	for _, r := range roles {
-		if r.Code == code {
-			return r, nil
-		}
-	}
-	return br, nil
+	return s.roleRepo.GetBrandRoleWithPermissions(ctx, brandID, code)
 }
 
 // roleNameMax 角色名长度上限（契约：1–40 字符）。

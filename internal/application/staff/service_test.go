@@ -143,6 +143,15 @@ func (f *fakeRoleRepo) GetBrandRoleByCode(_ context.Context, _ int64, code strin
 	}
 	return nil, apperr.NewAppError(apperr.ErrRoleNotFound, "x", 404)
 }
+func (f *fakeRoleRepo) GetBrandRoleWithPermissions(_ context.Context, _ int64, code string) (*role.BrandRole, error) {
+	if f.byCodeErr != nil {
+		return nil, f.byCodeErr
+	}
+	if v, ok := f.byCode[code]; ok {
+		return v, nil
+	}
+	return nil, apperr.NewAppError(apperr.ErrRoleNotFound, "x", 404)
+}
 func (f *fakeRoleRepo) ListRoleTemplatesWithPermissions(_ context.Context) ([]*role.RoleTemplate, error) {
 	return f.templates, nil
 }

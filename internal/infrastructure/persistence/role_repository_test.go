@@ -263,6 +263,41 @@ func TestUpdateBrandRole_ReplacesPermissions(t *testing.T) {
 	}
 }
 
+func TestGetBrandRoleWithPermissions(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewRoleRepository(db)
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+
+	created, err := repo.CreateBrandRole(context.Background(), role.CreateBrandRoleInput{
+		BrandID: brandID, ActorID: 1, Name: "前台", ScopeType: role.ScopeBrand,
+		PermissionCodes: []string{"staff.create", "staff.edit"},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	got, err := repo.GetBrandRoleWithPermissions(context.Background(), brandID, created.Code)
+	if err != nil {
+		t.Fatalf("GetBrandRoleWithPermissions: %v", err)
+	}
+	if got.ID != created.ID || got.Code != created.Code {
+		t.Errorf("got id=%d code=%q, want id=%d code=%q", got.ID, got.Code, created.ID, created.Code)
+	}
+	gotCodes := map[string]bool{}
+	for _, p := range got.Permissions {
+		gotCodes[p.Code] = true
+	}
+	if len(got.Permissions) != 2 || !gotCodes["staff.create"] || !gotCodes["staff.edit"] {
+		t.Errorf("Permissions = %v, want [staff.create staff.edit]", got.Permissions)
+	}
+
+	// Unknown code → ErrRoleNotFound (404).
+	_, err = repo.GetBrandRoleWithPermissions(context.Background(), brandID, "does_not_exist")
+	if ae := apperr.GetAppError(err); ae == nil || ae.Code != apperr.ErrRoleNotFound || ae.HTTPStatus != 404 {
+		t.Fatalf("err = %v, want ROLE_NOT_FOUND 404", err)
+	}
+}
+
 func TestListPermissions_GroupableByDomain(t *testing.T) {
 	db := newMigratedTestDB(t)
 	repo := NewRoleRepository(db)
