@@ -40,3 +40,7 @@ configs/config.local.yaml
 
 # Binary output
 bin/
+
+# Runtime artifacts (logs + pid files)
+logs/
+run/
