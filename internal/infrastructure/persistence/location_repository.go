@@ -244,7 +244,16 @@ func (r *locationRepository) CountActiveReferences(ctx context.Context, brandID,
 		return 0, apperr.ErrInternalF("统计门店角色任职引用失败", err)
 	}
 
-	return staffCount + roleCount, nil
+	// Batch 11：把未完成的课程场次也纳入引用保护，避免软删门店留下悬空 scheduled/in_progress 场次。
+	var sessionCount int64
+	if err := r.db.WithContext(ctx).
+		Model(&ClassSessionModel{}).
+		Where("location_id = ? AND brand_id = ? AND status IN ?", locationID, brandID, []string{"scheduled", "in_progress"}).
+		Count(&sessionCount).Error; err != nil {
+		return 0, apperr.ErrInternalF("统计门店场次引用失败", err)
+	}
+
+	return staffCount + roleCount + sessionCount, nil
 }
 
 // writeLocationOperationLog 在事务内写一条门店生命周期 OperationLog。

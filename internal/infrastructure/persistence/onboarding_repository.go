@@ -185,7 +185,7 @@ func (r *onboardingRepository) GetCounts(ctx context.Context, brandID int64) (*o
 	//   - brand_users:          active（已是；忽略 disabled 员工）
 	//   - instructor_profiles:  active（排除 inactive 教练）
 	//   - course_categories:    active
-	//   - courses:              排除软删 + active（排除 draft / archived）
+	//   - courses:              排除软删 + published（Batch 11 CourseTemplate 发布态；排除 draft / archived）
 	//   - entitlement_products: active
 	//   - class_sessions:       scheduled / in_progress / completed（排除 draft / cancelled）
 	queries := []kv{
@@ -193,7 +193,7 @@ func (r *onboardingRepository) GetCounts(ctx context.Context, brandID int64) (*o
 		{&out.Staff, "SELECT COUNT(*) FROM brand_users WHERE brand_id = ? AND deleted_at IS NULL AND status = 'active'"},
 		{&out.InstructorProfile, "SELECT COUNT(*) FROM instructor_profiles WHERE brand_id = ? AND status = 'active'"},
 		{&out.CourseCategory, "SELECT COUNT(*) FROM course_categories WHERE brand_id = ? AND status = 'active'"},
-		{&out.CourseTemplate, "SELECT COUNT(*) FROM courses WHERE brand_id = ? AND deleted_at IS NULL AND status = 'active'"},
+		{&out.CourseTemplate, "SELECT COUNT(*) FROM courses WHERE brand_id = ? AND deleted_at IS NULL AND status = 'published'"},
 		{&out.EntitlementTemplate, "SELECT COUNT(*) FROM entitlement_products WHERE brand_id = ? AND status = 'active'"},
 		{&out.ClassSession, "SELECT COUNT(*) FROM class_sessions WHERE brand_id = ? AND status IN ('scheduled', 'in_progress', 'completed')"},
 	}

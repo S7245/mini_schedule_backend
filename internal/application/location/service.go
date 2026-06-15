@@ -220,13 +220,13 @@ func (s *Service) Delete(ctx context.Context, brandID, actorID, id int64) error 
 	if err := s.guardLocationInScope(ctx, brandID, actorID, id); err != nil {
 		return err
 	}
-	// Batch 9：软删不触发 FK，先查 active 引用（员工任职 + 门店级角色任职），有则拒删。
+	// Batch 9/11：软删不触发 FK，先查 active 引用（员工任职 + 门店级角色任职 + 未完成场次），有则拒删。
 	n, err := s.repo.CountActiveReferences(ctx, brandID, id)
 	if err != nil {
 		return err
 	}
 	if n > 0 {
-		return apperr.NewAppError(apperr.ErrLocationInUse, "该门店仍有员工任职或角色绑定，请先移除后再删除", 409)
+		return apperr.NewAppError(apperr.ErrLocationInUse, "该门店仍有员工任职、角色绑定或已排课程场次，请先处理后再删除", 409)
 	}
 	return s.repo.SoftDelete(ctx, brandID, actorID, id)
 }
