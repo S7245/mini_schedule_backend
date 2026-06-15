@@ -282,7 +282,7 @@ func (s *Service) resolveRoleAssignments(
 
 	out := make([]staff.RoleAssignmentResolved, 0, len(roleCodes))
 	for _, code := range roleCodes {
-		if code == "brand_owner" {
+		if code == role.OwnerRoleCode {
 			return nil, apperr.NewAppError(apperr.ErrInvalidParam, "品牌负责人角色不可手动分配", 400)
 		}
 		br, err := s.roleRepo.GetBrandRoleByCode(ctx, brandID, code)
@@ -445,7 +445,7 @@ func (s *Service) ReplaceRoleAssignments(
 	// 校验 + 解析每行
 	resolved := make([]staff.RoleAssignmentResolved, 0, len(items))
 	for _, it := range items {
-		if it.RoleCode == "brand_owner" {
+		if it.RoleCode == role.OwnerRoleCode {
 			return nil, apperr.NewAppError(apperr.ErrInvalidParam, "品牌负责人角色不可手动分配", 400)
 		}
 		br, err := s.roleRepo.GetBrandRoleByCode(ctx, brandID, it.RoleCode)
@@ -718,7 +718,7 @@ func (s *Service) requireMutableCustomRole(ctx context.Context, brandID int64, c
 	if err != nil {
 		return nil, err
 	}
-	if br.Code == "brand_owner" {
+	if br.IsOwnerRole() {
 		return nil, apperr.NewAppError(apperr.ErrOwnerProtected, "品牌负责人角色受保护，不可修改或删除", 409)
 	}
 	if br.IsSystem {

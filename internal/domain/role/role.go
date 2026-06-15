@@ -11,6 +11,9 @@ import (
 )
 
 const (
+	// OwnerRoleCode 品牌负责人系统角色 code（受保护：不可手动分配 / 修改 / 删除）。
+	OwnerRoleCode = "brand_owner"
+
 	ScopeBrand    = "brand"
 	ScopeLocation = "location"
 
@@ -43,6 +46,11 @@ type BrandRole struct {
 	Status      string       `json:"status"`
 	Description string       `json:"description,omitempty"`
 	Permissions []Permission `json:"permissions,omitempty"`
+}
+
+// IsOwnerRole 判断是否为受保护的品牌负责人系统角色。
+func (r *BrandRole) IsOwnerRole() bool {
+	return r.Code == OwnerRoleCode
 }
 
 // Permission permissions 表的领域投影。
