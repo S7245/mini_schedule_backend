@@ -7,10 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	brandapp "github.com/zkw/mini-schedule/backend/internal/application/brand"
-	"github.com/zkw/mini-schedule/backend/internal/application/course"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
-	coursedomain "github.com/zkw/mini-schedule/backend/internal/domain/course"
 	trainingdomain "github.com/zkw/mini-schedule/backend/internal/domain/training"
 	domainuser "github.com/zkw/mini-schedule/backend/internal/domain/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
@@ -24,7 +22,6 @@ type Handler struct {
 	brandSvc     *brandapp.Service
 	brandUserSvc *user.BrandUserService
 	appUserSvc   *user.AppUserService
-	courseSvc    *course.Service
 	trainingSvc  *training.Service
 	jwtSvc       *cache.Service
 	validator    *validation.Validator
@@ -39,6 +36,11 @@ type Handler struct {
 
 	// Batch 6
 	me *MeHandler
+
+	// Batch 11 — 课程分类 / 课程模板 / 课程场次
+	courseCategory *CourseCategoryHandler
+	courseTemplate *CourseTemplateHandler
+	classSession   *ClassSessionHandler
 }
 
 // NewHandler 创建品牌 Handler
@@ -46,7 +48,6 @@ func NewHandler(
 	brandSvc *brandapp.Service,
 	brandUserSvc *user.BrandUserService,
 	appUserSvc *user.AppUserService,
-	courseSvc *course.Service,
 	trainingSvc *training.Service,
 	jwtSvc *cache.Service,
 	onboarding *OnboardingHandler,
@@ -54,20 +55,25 @@ func NewHandler(
 	location *LocationHandler,
 	staff *StaffHandler,
 	me *MeHandler,
+	courseCategory *CourseCategoryHandler,
+	courseTemplate *CourseTemplateHandler,
+	classSession *ClassSessionHandler,
 ) *Handler {
 	return &Handler{
-		brandSvc:     brandSvc,
-		brandUserSvc: brandUserSvc,
-		appUserSvc:   appUserSvc,
-		courseSvc:    courseSvc,
-		trainingSvc:  trainingSvc,
-		jwtSvc:       jwtSvc,
-		validator:    validation.New(),
-		onboarding:   onboarding,
-		profile:      profile,
-		location:     location,
-		staff:        staff,
-		me:           me,
+		brandSvc:       brandSvc,
+		brandUserSvc:   brandUserSvc,
+		appUserSvc:     appUserSvc,
+		trainingSvc:    trainingSvc,
+		jwtSvc:         jwtSvc,
+		validator:      validation.New(),
+		onboarding:     onboarding,
+		profile:        profile,
+		location:       location,
+		staff:          staff,
+		me:             me,
+		courseCategory: courseCategory,
+		courseTemplate: courseTemplate,
+		classSession:   classSession,
 	}
 }
 
@@ -88,16 +94,19 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		auth.GET("/users", h.listUsers)
 		auth.GET("/users/:id", h.getUser)
 
-		// 课程管理
-		auth.POST("/courses", h.createCourse)
-		auth.GET("/courses", h.listCourses)
-		auth.GET("/courses/:id", h.getCourse)
-		auth.PUT("/courses/:id", h.updateCourse)
-		auth.DELETE("/courses/:id", h.deleteCourse)
-		auth.PATCH("/courses/:id/status", h.updateCourseStatus)
-
 		// 训练记录
 		auth.GET("/trainings", h.listTrainings)
+
+		// Batch 11 — 课程分类 / 课程模板（替换 legacy 健身 /courses）/ 课程场次
+		if h.courseCategory != nil {
+			h.courseCategory.RegisterRoutes(auth)
+		}
+		if h.courseTemplate != nil {
+			h.courseTemplate.RegisterRoutes(auth)
+		}
+		if h.classSession != nil {
+			h.classSession.RegisterRoutes(auth)
+		}
 
 		// Batch 4 — 品牌资料 / onboarding / 门店
 		if h.profile != nil {
@@ -245,136 +254,6 @@ func (h *Handler) getUser(c *gin.Context) {
 	}
 
 	response.Success(c, result)
-}
-
-// CreateCourseRequest
-type CreateCourseRequest struct {
-	Title       string `json:"title" validate:"required,min=2,max=200"`
-	Description string `json:"description" validate:"omitempty,max=2000"`
-	CoverURL    string `json:"cover_url" validate:"omitempty,url"`
-	Difficulty  string `json:"difficulty" validate:"required,oneof=beginner intermediate advanced"`
-	DurationMin int    `json:"duration_min" validate:"required,gt=0"`
-	Type        string `json:"type" validate:"required,oneof=strength cardio flexibility hiit"`
-}
-
-func (h *Handler) createCourse(c *gin.Context) {
-	brandID := middleware.GetBrandID(c)
-	var req CreateCourseRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
-		return
-	}
-
-	if err := h.validator.Struct(req); err != nil {
-		response.Error(c, h.validator.InvalidRequest(c, err))
-		return
-	}
-
-	result, err := h.courseSvc.CreateCourse(c.Request.Context(), coursedomain.CreateCourseInput{
-		BrandID:     brandID,
-		Title:       req.Title,
-		Description: req.Description,
-		CoverURL:    req.CoverURL,
-		Difficulty:  coursedomain.Difficulty(req.Difficulty),
-		DurationMin: req.DurationMin,
-		Type:        coursedomain.CourseType(req.Type),
-	})
-	if err != nil {
-		response.Error(c, err)
-		return
-	}
-
-	response.Success(c, result)
-}
-
-func (h *Handler) listCourses(c *gin.Context) {
-	brandID := middleware.GetBrandID(c)
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-
-	results, total, err := h.courseSvc.ListCoursesByBrand(c.Request.Context(), brandID, page, pageSize)
-	if err != nil {
-		response.Error(c, err)
-		return
-	}
-
-	response.SuccessPage(c, results, total, page, pageSize)
-}
-
-func (h *Handler) getCourse(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		response.Error(c, response.ErrInvalidRequest("无效的课程 ID"))
-		return
-	}
-
-	result, err := h.courseSvc.GetCourse(c.Request.Context(), id)
-	if err != nil {
-		response.Error(c, err)
-		return
-	}
-
-	response.Success(c, result)
-}
-
-func (h *Handler) updateCourse(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		response.Error(c, response.ErrInvalidRequest("无效的课程 ID"))
-		return
-	}
-
-	var req coursedomain.UpdateCourseInput
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
-		return
-	}
-
-	result, err := h.courseSvc.UpdateCourse(c.Request.Context(), id, req)
-	if err != nil {
-		response.Error(c, err)
-		return
-	}
-
-	response.Success(c, result)
-}
-
-func (h *Handler) deleteCourse(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		response.Error(c, response.ErrInvalidRequest("无效的课程 ID"))
-		return
-	}
-
-	if err := h.courseSvc.DeleteCourse(c.Request.Context(), id); err != nil {
-		response.Error(c, err)
-		return
-	}
-
-	response.SuccessNoData(c)
-}
-
-func (h *Handler) updateCourseStatus(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		response.Error(c, response.ErrInvalidRequest("无效的课程 ID"))
-		return
-	}
-
-	var req struct {
-		Status string `json:"status" validate:"required,oneof=draft published archived"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
-		return
-	}
-
-	if err := h.courseSvc.UpdateCourseStatus(c.Request.Context(), id, coursedomain.Status(req.Status)); err != nil {
-		response.Error(c, err)
-		return
-	}
-
-	response.SuccessNoData(c)
 }
 
 func (h *Handler) listTrainings(c *gin.Context) {

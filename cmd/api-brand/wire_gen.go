@@ -11,8 +11,10 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
 	"github.com/zkw/mini-schedule/backend/internal/application/brandprofile"
+	"github.com/zkw/mini-schedule/backend/internal/application/classsession"
 	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
-	"github.com/zkw/mini-schedule/backend/internal/application/course"
+	"github.com/zkw/mini-schedule/backend/internal/application/coursecategory"
+	"github.com/zkw/mini-schedule/backend/internal/application/coursetemplate"
 	"github.com/zkw/mini-schedule/backend/internal/application/location"
 	"github.com/zkw/mini-schedule/backend/internal/application/onboarding"
 	rbac2 "github.com/zkw/mini-schedule/backend/internal/application/rbac"
@@ -52,8 +54,6 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	brandUserService := user.NewBrandUserService(brandUserRepository, cacheService, log, cfg)
 	appUserRepository := persistence.NewAppUserRepository(db)
 	appUserService := user.NewAppUserService(appUserRepository, cfg)
-	courseRepository := persistence.NewCourseRepository(db)
-	courseService := course.NewService(courseRepository, cfg)
 	trainingRepository := persistence.NewTrainingRepository(db)
 	trainingService := training.NewService(trainingRepository, cfg)
 	onboardingRepository := persistence.NewOnboardingRepository(db)
@@ -82,7 +82,16 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	staffService := staff.NewService(staffRepository, roleRepository, instructorRepository, checker)
 	staffHandler := brand2.NewStaffHandler(staffService)
 	meHandler := brand2.NewMeHandler(checker)
-	handler := brand2.NewHandler(service, brandUserService, appUserService, courseService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler, staffHandler, meHandler)
+	coursecategoryRepository := persistence.NewCourseCategoryRepository(db)
+	coursecategoryService := coursecategory.NewService(coursecategoryRepository, checker)
+	courseCategoryHandler := brand2.NewCourseCategoryHandler(coursecategoryService)
+	coursetemplateRepository := persistence.NewCourseTemplateRepository(db)
+	coursetemplateService := coursetemplate.NewService(coursetemplateRepository, checker)
+	courseTemplateHandler := brand2.NewCourseTemplateHandler(coursetemplateService)
+	classsessionRepository := persistence.NewClassSessionRepository(db)
+	classsessionService := classsession.NewService(classsessionRepository, checker)
+	classSessionHandler := brand2.NewClassSessionHandler(classsessionService)
+	handler := brand2.NewHandler(service, brandUserService, appUserService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler, staffHandler, meHandler, courseCategoryHandler, courseTemplateHandler, classSessionHandler)
 	commercialRepository := persistence.NewCommercialRepository(db)
 	weChatPaymentAdapter := payment.NewWeChatPaymentAdapter(cfg)
 	commercialService := commercial.NewService(commercialRepository, cfg, client, weChatPaymentAdapter)

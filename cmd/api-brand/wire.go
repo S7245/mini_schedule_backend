@@ -13,8 +13,10 @@ import (
 
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
 	"github.com/zkw/mini-schedule/backend/internal/application/brandprofile"
+	appClassSession "github.com/zkw/mini-schedule/backend/internal/application/classsession"
 	commercialapp "github.com/zkw/mini-schedule/backend/internal/application/commercial"
-	"github.com/zkw/mini-schedule/backend/internal/application/course"
+	appCourseCategory "github.com/zkw/mini-schedule/backend/internal/application/coursecategory"
+	appCourseTemplate "github.com/zkw/mini-schedule/backend/internal/application/coursetemplate"
 	appLocation "github.com/zkw/mini-schedule/backend/internal/application/location"
 	appOnboarding "github.com/zkw/mini-schedule/backend/internal/application/onboarding"
 	"github.com/zkw/mini-schedule/backend/internal/application/rbac"
@@ -78,7 +80,6 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewBrandRepository,
 		persistence.NewBrandUserRepository,
 		persistence.NewAppUserRepository,
-		persistence.NewCourseRepository,
 		persistence.NewTrainingRepository,
 		persistence.NewCommercialRepository,
 		persistence.NewOnboardingRepository,
@@ -88,19 +89,25 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewRoleRepository,
 		persistence.NewInstructorRepository,
 		persistence.NewRBACRepository,
+		// Batch 11
+		persistence.NewCourseCategoryRepository,
+		persistence.NewCourseTemplateRepository,
+		persistence.NewClassSessionRepository,
 
-		// Batch 6 — RBAC checker + 4 个 service 的本地 PermissionChecker 接口绑定
+		// Batch 6/11 — RBAC checker + 各 service 的本地 PermissionChecker 接口绑定
 		provideRBACChecker,
 		wire.Bind(new(appStaff.PermissionChecker), new(*rbac.Checker)),
 		wire.Bind(new(appLocation.PermissionChecker), new(*rbac.Checker)),
 		wire.Bind(new(appOnboarding.PermissionChecker), new(*rbac.Checker)),
 		wire.Bind(new(brandprofile.PermissionChecker), new(*rbac.Checker)),
+		wire.Bind(new(appCourseCategory.PermissionChecker), new(*rbac.Checker)),
+		wire.Bind(new(appCourseTemplate.PermissionChecker), new(*rbac.Checker)),
+		wire.Bind(new(appClassSession.PermissionChecker), new(*rbac.Checker)),
 
 		// 应用服务
 		brand.NewService,
 		user.NewBrandUserService,
 		user.NewAppUserService,
-		course.NewService,
 		training.NewService,
 		commercialapp.NewService,
 		commercialapp.NewSubscriptionGuard,
@@ -109,6 +116,9 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		brandprofile.NewService,
 		appStaff.NewService,
 		appStaff.NewRoleAllocator,
+		appCourseCategory.NewService,
+		appCourseTemplate.NewService,
+		appClassSession.NewService,
 
 		// Handler
 		brandHandler.NewHandler,
@@ -117,6 +127,9 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		brandHandler.NewLocationHandler,
 		brandHandler.NewStaffHandler,
 		brandHandler.NewMeHandler,
+		brandHandler.NewCourseCategoryHandler,
+		brandHandler.NewCourseTemplateHandler,
+		brandHandler.NewClassSessionHandler,
 		providePublicHandler,
 
 		// 路由
