@@ -74,11 +74,13 @@ func (h *LocationHandler) list(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 	status := c.DefaultQuery("status", "all")
+	q := c.Query("q")
 
 	items, total, err := h.svc.List(c.Request.Context(), appLocation.ListInput{
 		BrandID:  brandID,
 		ActorID:  middleware.GetUserID(c),
 		Status:   status,
+		Q:        q,
 		Page:     page,
 		PageSize: pageSize,
 	})

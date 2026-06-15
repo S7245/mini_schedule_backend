@@ -106,6 +106,10 @@ func (r *locationRepository) List(ctx context.Context, filter location.ListLocat
 	if filter.Status == string(location.StatusActive) || filter.Status == string(location.StatusInactive) {
 		q = q.Where("status = ?", filter.Status)
 	}
+	// Batch 10 T06：门店名模糊搜索（Postgres ILIKE，大小写不敏感）。
+	if filter.Q != "" {
+		q = q.Where("name ILIKE ?", "%"+filter.Q+"%")
+	}
 	// Batch 6 T07：data_scope=assigned_locations 收紧。nil = 不限制；空切片 = 拒绝所有。
 	if filter.ScopeLocationIDs != nil {
 		if len(filter.ScopeLocationIDs) == 0 {

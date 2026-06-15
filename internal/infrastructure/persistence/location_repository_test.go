@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
+	"github.com/zkw/mini-schedule/backend/internal/domain/location"
 )
 
 // seedLocation inserts an active location for the given brand and returns its id.
@@ -46,6 +47,40 @@ func seedBrandUser(t *testing.T, db *gorm.DB, brandID int64) int64 {
 		t.Fatalf("read brand_user id: %v", err)
 	}
 	return id
+}
+
+// TestList_NameSearch verifies the Batch 10 T06 q filter: name ILIKE (case-
+// insensitive) narrows results, empty q returns all.
+func TestList_NameSearch(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewLocationRepository(db, &commercial.SubscriptionGuard{})
+
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+	seedLocation(t, db, brandID, "北京旗舰店")
+	seedLocation(t, db, brandID, "上海店")
+
+	// q="北京" → only the matching one.
+	items, total, err := repo.List(context.Background(), location.ListLocationsFilter{
+		BrandID: brandID,
+		Q:       "北京",
+	}, 0, 20)
+	if err != nil {
+		t.Fatalf("List q=北京: %v", err)
+	}
+	if total != 1 || len(items) != 1 || items[0].Name != "北京旗舰店" {
+		t.Fatalf("q=北京 → total=%d items=%v, want exactly [北京旗舰店]", total, items)
+	}
+
+	// q="" → both.
+	items, total, err = repo.List(context.Background(), location.ListLocationsFilter{
+		BrandID: brandID,
+	}, 0, 20)
+	if err != nil {
+		t.Fatalf("List q=empty: %v", err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("q=empty → total=%d items=%d, want 2", total, len(items))
+	}
 }
 
 // TestCountActiveReferences_StaffAndRole verifies the delete-guard counter (BE-4):

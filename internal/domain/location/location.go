@@ -53,6 +53,8 @@ type UpdateLocationInput struct {
 type ListLocationsFilter struct {
 	BrandID int64
 	Status  string // "active" / "inactive" / "" (= all)
+	// Q 门店名模糊搜索（大小写不敏感，ILIKE）。空字符串 = 不过滤（Batch 10 T06）。
+	Q string
 	// ScopeLocationIDs 非 nil 时按 data_scope 收紧：只返这些 id 的 location（Batch 6 T07）。
 	// nil = 不限制；空切片 = 拒绝所有。
 	ScopeLocationIDs []int64

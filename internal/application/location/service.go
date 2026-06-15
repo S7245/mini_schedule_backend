@@ -96,6 +96,7 @@ type ListInput struct {
 	BrandID  int64
 	ActorID  int64
 	Status   string // "active" / "inactive" / "" / "all"
+	Q        string // 门店名模糊搜索（Batch 10 T06）
 	Page     int
 	PageSize int
 }
@@ -166,6 +167,7 @@ func (s *Service) List(ctx context.Context, in ListInput) ([]*domainlocation.Loc
 	return s.repo.List(ctx, domainlocation.ListLocationsFilter{
 		BrandID:          in.BrandID,
 		Status:           status,
+		Q:                strings.TrimSpace(in.Q),
 		ScopeLocationIDs: scopeIDs,
 	}, (page-1)*pageSize, pageSize)
 }
