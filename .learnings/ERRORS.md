@@ -104,3 +104,7 @@ psql -d mini_schedule -c 'ALTER TABLE brands ADD COLUMN IF NOT EXISTS descriptio
 `application/rbac/checker.go` 的 L1 缓存 key 是 `cacheKeyForUser(brandUserID)` = `rbac:perms:<brandUserID>`，**只含 brand_user_id 不含 brand_id**。当前数据模型下 brand_user_id 全局唯一、且天然属于单一 brand，所以不会串。但这是一个隐含不变量——**一旦未来 brand_user 支持跨 brand（同一自然人在多 brand 任职、复用同一 brand_user 记录），单维度 key 会让 A brand 的权限集泄漏到 B brand 的请求**。
 
 ctx-cache 那一层 key 是 `requestKey(brandID, brandUserID)`（含 brand_id，正确），唯独 Redis L1 漏了 brand_id。**建议**：即便当前不变量成立，也把 L1 key 改成 `rbac:perms:<brandID>:<brandUserID>` 提前对齐 ctx-cache 维度，消除这个"靠数据模型巧合保证正确"的脆弱依赖；改 key 只需配合 TTL 自然过期，无需手动清缓存。
+## 2026-06-12 Batch 7
+
+- **手机号重复新增返回 500 而非业务错误（线上活 bug，已修）**：`POST /brand/staff` 手机号唯一冲突时本应返 `STAFF_PHONE_DUPLICATED`(409)，实返 `INTERNAL_SERVER_ERROR`。根因：共享 `isUniqueViolation`（user_repository.go）用英文前缀字符串匹配，pgx 错误串无该前缀 → 漏判 → 唯一冲突分支没进。影响 ~11 处调用点（staff/user/brand/location/commercial/instructor）。修：改 `errors.As(*pgconn.PgError)` + code 23505（commit `72f8583`），string 匹配仅作兜底。**Pending exposure**：所有依赖该 helper 把唯一冲突转业务错误的路径之前都可能在生产返 500，值得回归各注册/创建入口。
+- **旧二进制掩盖新逻辑（验收期踩坑，非 bug）**：B1 增量逻辑改完 `go build` 通过，但 :8081 上跑的是改码前启动的 `go run` 进程，验收"看似失效"返旧行为。重启后端即正常。教训：本地验收前务必重建/重启后端；CI/部署需确保用最新源码构建。
