@@ -83,3 +83,14 @@
 - **软删 + FK 行为的陷阱**：GORM 软删是 `UPDATE deleted_at`，**不触发任何 FK ON DELETE（CASCADE/RESTRICT/SET NULL 全不生效）**，会留下指向已软删行的悬空引用。凡是软删的主表，删除前必须 service 层显式查引用（COUNT > 0 → 409 IN_USE），不能指望 FK。镜像 Batch 7 A4。
 - **引用计数带 brand_id 隔离**：`CountActiveReferences(brandID, locationID)` 两个 COUNT 都带 `brand_id=?`，防跨租户同 id 误计（location_id 是全局自增，但租户边界要在 WHERE 显式带上）。
 - **只检查"当前真实有数据"的引用表**：12 张表带 location_id，但只 COUNT 当前有 CRUD/有数据的两张（staff_location_assignments + brand_user_role_assignments.location_id）；class_sessions/recurring_schedules schema 已建但无数据，纳入是空检查（违反"先抽象再找落点"）。等那批落地再加进同一 guard 方法。
+
+## 2026-06-15 Batch 10 — 小债清扫（RBAC 重构 + 搜索）
+
+- **行为不变重构的安全网 = 旧单测不改断言全绿**：本批 GetRole 单查 / InvalidateMany / IsOwnerRole 收敛三项都是纯重构，验收标准就是 Batch 7 的 role_crud_test/service_test/repo_test 一行断言不动仍 PASS。重构 RBAC 这类安全敏感代码，先确认有覆盖的旧测试再动手。
+- **谓词收敛магic string**：散落的 `code == "brand_owner"` 收敛成 `role.OwnerRoleCode` const + `(*BrandRole).IsOwnerRole()`。注意保持调用点的**错误码优先级**（requireMutableCustomRole：owner→OWNER_PROTECTED 先于 system→ROLE_IS_SYSTEM），收敛只换判定不换分支顺序。
+- **server-side 名称搜索用参数化 ILIKE**：`q = q.Where("name ILIKE ?", "%"+input+"%")`，Postgres ILIKE 大小写不敏感，`?` 占位避免注入。service 层 `strings.TrimSpace` 后只在非空时下推，空 q 不加 WHERE。
+- **变长 DEL**：`cacheStore.Del(ctx, keys...)` 改 variadic，一次多 key 失效；redis 实现 + memCache fake 同步改。批量失效从 N 次往返降到 1 次。
+
+## 2026-06-15 Batch 10 — 已解决的 FR
+
+backend FR 中以下 Batch 7 code-review 转移项本批已做：GetRole 双查（→ GetBrandRoleWithPermissions 单查）、角色缓存逐 key DEL（→ InvalidateMany）、brand_owner/is_system 字面量散落（→ IsOwnerRole 收敛）。剩 `/roles/:id` 参数命名未改（低优先，留 FR）。
