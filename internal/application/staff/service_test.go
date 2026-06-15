@@ -207,6 +207,11 @@ func (f *fakePermissionChecker) Invalidate(_ context.Context, brandUserID int64)
 	return f.invalidateErr
 }
 
+func (f *fakePermissionChecker) InvalidateMany(_ context.Context, brandUserIDs []int64) error {
+	f.invalidatedIDs = append(f.invalidatedIDs, brandUserIDs...)
+	return f.invalidateErr
+}
+
 func newSvc(sr *fakeStaffRepo, rr *fakeRoleRepo, ir *fakeInstrRepo) *Service {
 	if rr == nil {
 		rr = &fakeRoleRepo{byCode: map[string]*role.BrandRole{}}

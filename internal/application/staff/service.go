@@ -26,6 +26,9 @@ type PermissionChecker interface {
 	Resolve(ctx context.Context, brandID, brandUserID int64) (domainrbac.PermissionSet, domainrbac.DataScope, error)
 	// Invalidate evicts the cached permission set for a brand_user (Batch 7 C1).
 	Invalidate(ctx context.Context, brandUserID int64) error
+	// InvalidateMany evicts cached permission sets for many brand_users in one
+	// batched Redis DEL (Batch 10 T04).
+	InvalidateMany(ctx context.Context, brandUserIDs []int64) error
 }
 
 // Service 编排 staff CRUD + 角色 / 任职 / 教练。
@@ -765,7 +768,7 @@ func (s *Service) guardPermissionSubset(ctx context.Context, brandID, actorID in
 	return nil
 }
 
-// invalidateRoleHolders C1：反查持有该角色的全部 brand_user 并逐一失效缓存（post-commit）。
+// invalidateRoleHolders C1：反查持有该角色的全部 brand_user 并一次性批量失效缓存（post-commit）。
 func (s *Service) invalidateRoleHolders(ctx context.Context, roleID int64) {
 	if s.checker == nil {
 		return
@@ -774,16 +777,7 @@ func (s *Service) invalidateRoleHolders(ctx context.Context, roleID int64) {
 	if err != nil {
 		return // 失效失败不阻断主流程；60s TTL 兜底
 	}
-	for _, uid := range ids {
-		_ = s.invalidateUser(ctx, uid)
-	}
-}
-
-func (s *Service) invalidateUser(ctx context.Context, brandUserID int64) error {
-	if s.checker == nil {
-		return nil
-	}
-	return s.checker.Invalidate(ctx, brandUserID)
+	_ = s.checker.InvalidateMany(ctx, ids) // 失效失败不阻断主流程；60s TTL 兜底
 }
 
 func validateRoleName(name string) error {

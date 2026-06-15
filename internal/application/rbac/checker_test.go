@@ -15,13 +15,13 @@ import (
 // ---- fakes ----
 
 type fakeRBACRepo struct {
-	loadCalls   int32
-	loadErr     error
-	rawCodes    []string
-	scope       domainrbac.DataScope
-	isOwner     bool
-	listAllErr  error
-	allCodes    []string
+	loadCalls  int32
+	loadErr    error
+	rawCodes   []string
+	scope      domainrbac.DataScope
+	isOwner    bool
+	listAllErr error
+	allCodes   []string
 }
 
 func (f *fakeRBACRepo) LoadEffectiveRaw(_ context.Context, _ int64, _ int64) ([]string, domainrbac.DataScope, bool, error) {
@@ -73,13 +73,15 @@ func (c *memCache) Set(_ context.Context, key string, val *cachedResolve, _ time
 	return nil
 }
 
-func (c *memCache) Del(_ context.Context, key string) error {
+func (c *memCache) Del(_ context.Context, keys ...string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.delErr != nil {
 		return c.delErr
 	}
-	delete(c.store, key)
+	for _, key := range keys {
+		delete(c.store, key)
+	}
 	return nil
 }
 
@@ -288,6 +290,51 @@ func TestInvalidate_EvictsL1Key(t *testing.T) {
 	}
 	if cache.has(cacheKeyForUser(42)) {
 		t.Fatalf("expected L1 key evicted after Invalidate")
+	}
+}
+
+func TestInvalidateMany_EvictsAllKeys(t *testing.T) {
+	repo := &fakeRBACRepo{rawCodes: []string{"staff.view"}, scope: domainrbac.DataScope{Kind: domainrbac.DataScopeAllBrand}}
+	cache := newMemCache()
+	c := newCheckerWithFakes(t, repo, cache)
+
+	for _, uid := range []int64{42, 43, 44} {
+		if _, _, err := c.Resolve(context.Background(), 1, uid); err != nil {
+			t.Fatalf("Resolve(%d): %v", uid, err)
+		}
+		if !cache.has(cacheKeyForUser(uid)) {
+			t.Fatalf("expected L1 key cached for %d", uid)
+		}
+	}
+
+	if err := c.InvalidateMany(context.Background(), []int64{42, 43, 44}); err != nil {
+		t.Fatalf("InvalidateMany: %v", err)
+	}
+	for _, uid := range []int64{42, 43, 44} {
+		if cache.has(cacheKeyForUser(uid)) {
+			t.Fatalf("expected L1 key evicted for %d after InvalidateMany", uid)
+		}
+	}
+}
+
+func TestInvalidateMany_EmptyIsNoOp(t *testing.T) {
+	repo := &fakeRBACRepo{}
+	cache := newMemCache()
+	cache.delErr = errors.New("must not be called")
+	c := newCheckerWithFakes(t, repo, cache)
+	if err := c.InvalidateMany(context.Background(), nil); err != nil {
+		t.Fatalf("InvalidateMany(nil) should be no-op, got %v", err)
+	}
+	if err := c.InvalidateMany(context.Background(), []int64{}); err != nil {
+		t.Fatalf("InvalidateMany([]) should be no-op, got %v", err)
+	}
+}
+
+func TestInvalidateMany_NilCacheIsNoOp(t *testing.T) {
+	repo := &fakeRBACRepo{}
+	c := newCheckerWithFakes(t, repo, nil)
+	if err := c.InvalidateMany(context.Background(), []int64{7, 8}); err != nil {
+		t.Fatalf("InvalidateMany with nil cache should be no-op, got %v", err)
 	}
 }
 

@@ -50,7 +50,8 @@ type cachedResolve struct {
 type cacheStore interface {
 	Get(ctx context.Context, key string) (*cachedResolve, error)
 	Set(ctx context.Context, key string, val *cachedResolve, ttl time.Duration) error
-	Del(ctx context.Context, key string) error
+	// Del removes one or more keys in a single round-trip (Redis DEL is variadic).
+	Del(ctx context.Context, keys ...string) error
 }
 
 // Checker is the central permission gate.
@@ -151,6 +152,37 @@ func (c *Checker) Invalidate(ctx context.Context, brandUserID int64) error {
 	if err := c.cache.Del(ctx, cacheKeyForUser(brandUserID)); err != nil {
 		c.log.Warn("rbac cache del failed",
 			slog.Int64("brand_user_id", brandUserID),
+			slog.Any("err", err),
+		)
+		return err
+	}
+	return nil
+}
+
+// InvalidateMany evicts the cached permission sets for many brand_users in a
+// single Redis DEL (instead of one round-trip per user). Call it after a role's
+// permissions/status change to evict every holder at once. No-op on empty input.
+//
+// Both tiers are cleared per id: each per-request ctx-cache entry and, in one
+// batched call, all L1 (Redis) keys. L1 Del failure is non-fatal (logged); the
+// 60s TTL is the backstop.
+func (c *Checker) InvalidateMany(ctx context.Context, brandUserIDs []int64) error {
+	if len(brandUserIDs) == 0 {
+		return nil
+	}
+	for _, id := range brandUserIDs {
+		requestCacheDeleteUser(ctx, id)
+	}
+	if c.cache == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(brandUserIDs))
+	for _, id := range brandUserIDs {
+		keys = append(keys, cacheKeyForUser(id))
+	}
+	if err := c.cache.Del(ctx, keys...); err != nil {
+		c.log.Warn("rbac cache del-many failed",
+			slog.Int("count", len(keys)),
 			slog.Any("err", err),
 		)
 		return err
@@ -375,9 +407,9 @@ func (r *redisCache) Set(ctx context.Context, key string, val *cachedResolve, tt
 	return r.client.Set(ctx, key, buf, ttl).Err()
 }
 
-func (r *redisCache) Del(ctx context.Context, key string) error {
-	if r == nil || r.client == nil {
+func (r *redisCache) Del(ctx context.Context, keys ...string) error {
+	if r == nil || r.client == nil || len(keys) == 0 {
 		return nil
 	}
-	return r.client.Del(ctx, key).Err()
+	return r.client.Del(ctx, keys...).Err()
 }
