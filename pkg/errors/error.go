@@ -85,6 +85,29 @@ const (
 	ErrRolePermissionExceedsActor ErrorCode = "ROLE_PERMISSION_EXCEEDS_ACTOR"
 	// ErrRoleCodeDuplicated (HTTP 409)：(brand_id, code) 冲突兜底（D3）。
 	ErrRoleCodeDuplicated ErrorCode = "ROLE_CODE_DUPLICATED"
+
+	// Batch 11 — CourseCategory / CourseTemplate / ClassSession。
+	// 注意：COURSE_NOT_FOUND 已在上方「课程相关」声明（ErrCourseNotFound, 404），此处复用，不重复定义。
+	// ErrCategoryNotFound (404)：category_ids 含非本 brand active 分类。
+	ErrCategoryNotFound ErrorCode = "CATEGORY_NOT_FOUND"
+	// ErrCategoryNameDuplicated (409)：course_categories(brand_id,name) 唯一约束冲突。
+	ErrCategoryNameDuplicated ErrorCode = "CATEGORY_NAME_DUPLICATED"
+	// ErrCourseNotActive (409)：排课时所选课程模板非 published。
+	ErrCourseNotActive ErrorCode = "COURSE_NOT_ACTIVE"
+	// ErrCourseInUse (409)：删除课程模板时仍有 scheduled/in_progress 场次引用。
+	ErrCourseInUse ErrorCode = "COURSE_IN_USE"
+	// ErrCourseLocationUnavailable (409)：课程在该门店不可用（course_location_availability）。
+	ErrCourseLocationUnavailable ErrorCode = "COURSE_LOCATION_UNAVAILABLE"
+	// ErrSessionNotFound (404)：场次不存在或越权。
+	ErrSessionNotFound ErrorCode = "SESSION_NOT_FOUND"
+	// ErrSessionTimeInvalid (400)：ends_at<=starts_at 或 starts_at 已过去。
+	ErrSessionTimeInvalid ErrorCode = "SESSION_TIME_INVALID"
+	// ErrSessionInstructorConflict (409)：教练同时段重叠（DB EXCLUDE 23P01）。
+	ErrSessionInstructorConflict ErrorCode = "SESSION_INSTRUCTOR_CONFLICT"
+	// ErrSessionCancelNotAllowed (409)：仅 scheduled/in_progress 可取消。
+	ErrSessionCancelNotAllowed ErrorCode = "SESSION_CANCEL_NOT_ALLOWED"
+	// ErrInstructorNotSchedulable (409)：教练 is_schedulable=false 或非 active。
+	ErrInstructorNotSchedulable ErrorCode = "INSTRUCTOR_NOT_SCHEDULABLE"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码
