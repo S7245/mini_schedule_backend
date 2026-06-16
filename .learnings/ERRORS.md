@@ -108,3 +108,13 @@ ctx-cache 那一层 key 是 `requestKey(brandID, brandUserID)`（含 brand_id，
 
 - **手机号重复新增返回 500 而非业务错误（线上活 bug，已修）**：`POST /brand/staff` 手机号唯一冲突时本应返 `STAFF_PHONE_DUPLICATED`(409)，实返 `INTERNAL_SERVER_ERROR`。根因：共享 `isUniqueViolation`（user_repository.go）用英文前缀字符串匹配，pgx 错误串无该前缀 → 漏判 → 唯一冲突分支没进。影响 ~11 处调用点（staff/user/brand/location/commercial/instructor）。修：改 `errors.As(*pgconn.PgError)` + code 23505（commit `72f8583`），string 匹配仅作兜底。**Pending exposure**：所有依赖该 helper 把唯一冲突转业务错误的路径之前都可能在生产返 500，值得回归各注册/创建入口。
 - **旧二进制掩盖新逻辑（验收期踩坑，非 bug）**：B1 增量逻辑改完 `go build` 通过，但 :8081 上跑的是改码前启动的 `go run` 进程，验收"看似失效"返旧行为。重启后端即正常。教训：本地验收前务必重建/重启后端；CI/部署需确保用最新源码构建。
+
+## 2026-06-16 Batch 11
+
+### 前端假设的后端端点从未实现 → 排课全链路 UI 阻断（验收期 e2e 抓到，commit dfda127）
+`web/packages/api/src/instructor.ts` 早注明 `ASSUMPTION (backend must match): GET /api/v1/brand/instructors?schedulable=true`，但后端从未注册该路由 → 排课弹窗「可排课教练」下拉调用返 404 → 下拉恒空 → H5/E7/onboarding 全阻断。数据正常（张三 instructor_profile id=1 active+schedulable）。修：instructor.Repository 加 `ListSchedulable` + staff.Service `ListSchedulableInstructors`（门 instructor.view）+ `GET /instructors` handler，返回 `{items:[{id=instructor_profile_id,display_name,status,is_schedulable}]}` 与 `POST /class-sessions` 的 instructor_profile_id 入参对齐。
+**Pending exposure**：凡前端 api client 里写了 `ASSUMPTION (backend must match)` 的端点，契约 API 接口表必须显式列入并后端落地；grep 全仓 `ASSUMPTION` 找漏网。
+**教训**：纯 API curl 烟测**硬编码 instructor_profile_id 绕过了下拉**所以没暴露——走 UI 选择器的 e2e 才抓到。涉及「前端下拉/选择器拉某列表」的功能，烟测必须走 UI 或显式调那个 list 端点，不能只测最终 POST。
+
+### CourseTemplate 更新传空 location_ids 误回填全部门店（code-review）
+`resolveLocationIDs` 把空 ids 当「默认全选 active 门店」——create 时正确（契约默认），但 update 时用户取消勾选全部门店保存会被静默回填成全部。修：加 `defaultAllWhenEmpty bool`，仅 create 传 true；update 传 false，尊重显式清空。

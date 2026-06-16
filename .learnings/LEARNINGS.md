@@ -94,3 +94,20 @@
 ## 2026-06-15 Batch 10 — 已解决的 FR
 
 backend FR 中以下 Batch 7 code-review 转移项本批已做：GetRole 双查（→ GetBrandRoleWithPermissions 单查）、角色缓存逐 key DEL（→ InvalidateMany）、brand_owner/is_system 字面量散落（→ IsOwnerRole 收敛）。剩 `/roles/:id` 参数命名未改（低优先，留 FR）。
+
+## 2026-06-16 Batch 11 — 课程模板 + 单场次排课
+
+### 新业务域纵切片照搬 location/staff 模板
+coursecategory / coursetemplate / classsession 三个域全程 mirror location：domain（实体+Status+IsValidStatus+Repository 接口）→ application/service（`require(code)` + `checker==nil` bypass + data_scope `scopeFilterIDs`/`guardLocationInScope`）→ persistence/repository（事务内 guard + audit.Write）→ interfaces/brand/*_handler（GetBrandID/GetUserID + response.Success/SuccessPage/Error）。新域照这条流水线写，零惊吓。
+
+### 共享表多模型共存（courses = legacy fitness + CourseTemplate）
+`courses` 同时被 api-app 只读 legacy `course` 域（含 difficulty/type）和 brand 端 CourseTemplate 消费。做法：**不动 legacy 域**（api-app 依赖），新建 `CourseTemplateModel`（同 `TableName()="courses"`，只映新字段，不含 difficulty/type）+ migration `DROP NOT NULL` 让新模板这两列写 NULL。两个 GORM 模型映同一张表互不干扰；CourseTemplateModel 用 `gorm.DeletedAt` 自动软删 + query scope。
+
+### DB EXCLUDE 约束 → 业务错误，别裸 500
+class_sessions 教练时段不重叠是 GiST EXCLUDE 约束（仅 scheduled/in_progress 生效）。插入撞约束返 SQLSTATE `23P01`，必须 `errors.As(*pgconn.PgError)` 判 code 映成 `SESSION_INSTRUCTOR_CONFLICT`(409)，否则降级成 500。镜像 `isUniqueViolation`(23505) 写了 `isExclusionViolation`(23P01)。靠 DB 约束兜底并发，不做应用层「先查后插」race。
+
+### 内联多对多硬删重插 + 批量 list 避 N+1
+课程↔分类 / 课程↔可用门店在 course 的 create/update 事务内「DELETE WHERE course_id=? + 逐条 INSERT」（同 staff_location_assignments）。list 时不要逐行查关联：先取本页 course_ids，一次 JOIN 查 assignments+categories 建 map，一次 GROUP BY 查 availability count，再组装。
+
+### onboarding 计数要和域的状态词对齐
+onboarding COUNT 的过滤状态必须跟域实际状态机一致：CourseTemplate 发布态是 `published` 不是 `active`，计数写 `active` 会永远不完成。新域落地时回头核对 onboarding_repository GetCounts 的过滤词。
