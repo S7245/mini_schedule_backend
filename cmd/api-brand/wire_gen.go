@@ -19,6 +19,7 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/application/locationresource"
 	"github.com/zkw/mini-schedule/backend/internal/application/onboarding"
 	rbac2 "github.com/zkw/mini-schedule/backend/internal/application/rbac"
+	"github.com/zkw/mini-schedule/backend/internal/application/recurringschedule"
 	"github.com/zkw/mini-schedule/backend/internal/application/staff"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
@@ -95,7 +96,10 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	locationresourceRepository := persistence.NewLocationResourceRepository(db)
 	locationresourceService := locationresource.NewService(locationresourceRepository, checker)
 	locationResourceHandler := brand2.NewLocationResourceHandler(locationresourceService)
-	handler := brand2.NewHandler(service, brandUserService, appUserService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler, staffHandler, meHandler, courseCategoryHandler, courseTemplateHandler, classSessionHandler, locationResourceHandler)
+	recurringscheduleRepository := persistence.NewRecurringScheduleRepository(db)
+	recurringscheduleService := recurringschedule.NewService(recurringscheduleRepository, checker)
+	recurringScheduleHandler := brand2.NewRecurringScheduleHandler(recurringscheduleService)
+	handler := brand2.NewHandler(service, brandUserService, appUserService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler, staffHandler, meHandler, courseCategoryHandler, courseTemplateHandler, classSessionHandler, locationResourceHandler, recurringScheduleHandler)
 	commercialRepository := persistence.NewCommercialRepository(db)
 	weChatPaymentAdapter := payment.NewWeChatPaymentAdapter(cfg)
 	commercialService := commercial.NewService(commercialRepository, cfg, client, weChatPaymentAdapter)

@@ -44,6 +44,9 @@ type Handler struct {
 
 	// Batch 12a — 门店资源
 	locationResource *LocationResourceHandler
+
+	// Batch 12b — 循环排课
+	recurringSchedule *RecurringScheduleHandler
 }
 
 // NewHandler 创建品牌 Handler
@@ -62,23 +65,25 @@ func NewHandler(
 	courseTemplate *CourseTemplateHandler,
 	classSession *ClassSessionHandler,
 	locationResource *LocationResourceHandler,
+	recurringSchedule *RecurringScheduleHandler,
 ) *Handler {
 	return &Handler{
-		brandSvc:         brandSvc,
-		brandUserSvc:     brandUserSvc,
-		appUserSvc:       appUserSvc,
-		trainingSvc:      trainingSvc,
-		jwtSvc:           jwtSvc,
-		validator:        validation.New(),
-		onboarding:       onboarding,
-		profile:          profile,
-		location:         location,
-		staff:            staff,
-		me:               me,
-		courseCategory:   courseCategory,
-		courseTemplate:   courseTemplate,
-		classSession:     classSession,
-		locationResource: locationResource,
+		brandSvc:          brandSvc,
+		brandUserSvc:      brandUserSvc,
+		appUserSvc:        appUserSvc,
+		trainingSvc:       trainingSvc,
+		jwtSvc:            jwtSvc,
+		validator:         validation.New(),
+		onboarding:        onboarding,
+		profile:           profile,
+		location:          location,
+		staff:             staff,
+		me:                me,
+		courseCategory:    courseCategory,
+		courseTemplate:    courseTemplate,
+		classSession:      classSession,
+		locationResource:  locationResource,
+		recurringSchedule: recurringSchedule,
 	}
 }
 
@@ -114,6 +119,9 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		}
 		if h.locationResource != nil {
 			h.locationResource.RegisterRoutes(auth)
+		}
+		if h.recurringSchedule != nil {
+			h.recurringSchedule.RegisterRoutes(auth)
 		}
 
 		// Batch 4 — 品牌资料 / onboarding / 门店

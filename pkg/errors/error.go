@@ -120,6 +120,14 @@ const (
 	ErrResourceNotAvailable ErrorCode = "RESOURCE_NOT_AVAILABLE"
 	// ErrSessionResourceConflict (409)：同一资源同一时段重叠（DB EXCLUDE class_sessions_resource_no_overlap，23P01）。
 	ErrSessionResourceConflict ErrorCode = "SESSION_RESOURCE_CONFLICT"
+
+	// 循环排课 (Batch 12b)
+	// ErrRecurringNotFound (404)：循环排课不存在或越权。
+	ErrRecurringNotFound ErrorCode = "RECURRING_NOT_FOUND"
+	// ErrRecurringAllConflict (409)：全部 occurrence 冲突，未生成任何场次（body 带 skipped 清单）。
+	ErrRecurringAllConflict ErrorCode = "RECURRING_ALL_CONFLICT"
+	// ErrRecurringCancelNotAllowed (409)：仅 active 状态的循环排课可取消。
+	ErrRecurringCancelNotAllowed ErrorCode = "RECURRING_CANCEL_NOT_ALLOWED"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码

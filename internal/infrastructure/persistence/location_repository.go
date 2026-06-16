@@ -263,7 +263,16 @@ func (r *locationRepository) CountActiveReferences(ctx context.Context, brandID,
 		return 0, apperr.ErrInternalF("统计门店资源引用失败", err)
 	}
 
-	return staffCount + roleCount + sessionCount + resourceCount, nil
+	// Batch 12b：active 循环排课也纳入引用保护。
+	var recurringCount int64
+	if err := r.db.WithContext(ctx).
+		Model(&RecurringScheduleModel{}).
+		Where("location_id = ? AND brand_id = ? AND status = ?", locationID, brandID, "active").
+		Count(&recurringCount).Error; err != nil {
+		return 0, apperr.ErrInternalF("统计门店循环排课引用失败", err)
+	}
+
+	return staffCount + roleCount + sessionCount + resourceCount + recurringCount, nil
 }
 
 // writeLocationOperationLog 在事务内写一条门店生命周期 OperationLog。
