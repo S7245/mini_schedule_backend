@@ -108,6 +108,18 @@ const (
 	ErrSessionCancelNotAllowed ErrorCode = "SESSION_CANCEL_NOT_ALLOWED"
 	// ErrInstructorNotSchedulable (409)：教练 is_schedulable=false 或非 active。
 	ErrInstructorNotSchedulable ErrorCode = "INSTRUCTOR_NOT_SCHEDULABLE"
+
+	// Location Resource 资源管理 (Batch 12a)
+	// ErrResourceNotFound (404)：资源不存在或越权。
+	ErrResourceNotFound ErrorCode = "RESOURCE_NOT_FOUND"
+	// ErrResourceNameDuplicated (409)：同门店资源重名（unique(location_id,name) where not deleted）。
+	ErrResourceNameDuplicated ErrorCode = "RESOURCE_NAME_DUPLICATED"
+	// ErrResourceInUse (409)：删除资源时仍被 scheduled/in_progress 场次或 active 循环排课引用。
+	ErrResourceInUse ErrorCode = "RESOURCE_IN_USE"
+	// ErrResourceNotAvailable (409)：排课绑定的资源已停用 / 软删 / 跨门店。
+	ErrResourceNotAvailable ErrorCode = "RESOURCE_NOT_AVAILABLE"
+	// ErrSessionResourceConflict (409)：同一资源同一时段重叠（DB EXCLUDE class_sessions_resource_no_overlap，23P01）。
+	ErrSessionResourceConflict ErrorCode = "SESSION_RESOURCE_CONFLICT"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码
