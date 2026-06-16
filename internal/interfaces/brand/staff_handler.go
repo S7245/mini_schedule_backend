@@ -34,6 +34,7 @@ func (h *StaffHandler) RegisterRoutes(g *gin.RouterGroup) {
 	g.DELETE("/staff/:id", h.delete)
 	g.PUT("/staff/:id/role-assignments", h.replaceRoleAssignments)
 	g.PUT("/staff/:id/location-assignments", h.replaceLocationAssignments)
+	g.GET("/instructors", h.listInstructors)
 	g.GET("/staff/:id/instructor", h.getInstructor)
 	g.PUT("/staff/:id/instructor", h.upsertInstructor)
 	g.DELETE("/staff/:id/instructor", h.deleteInstructor)
@@ -270,6 +271,37 @@ func (h *StaffHandler) replaceLocationAssignments(c *gin.Context) {
 		return
 	}
 	response.Success(c, s)
+}
+
+// schedulableInstructorItem 排课弹窗下拉用的精简教练投影。
+// id 即 instructor_profile_id，与 POST /class-sessions 的 instructor_profile_id 入参对齐。
+type schedulableInstructorItem struct {
+	ID            int64  `json:"id"`
+	DisplayName   string `json:"display_name"`
+	Status        string `json:"status"`
+	IsSchedulable bool   `json:"is_schedulable"`
+}
+
+// listInstructors GET /instructors[?schedulable=true]
+// 当前仅服务排课弹窗，固定返回本 brand 下 active + 可排课的教练。
+func (h *StaffHandler) listInstructors(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
+	profiles, err := h.svc.ListSchedulableInstructors(c.Request.Context(), brandID, actorID)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	items := make([]schedulableInstructorItem, 0, len(profiles))
+	for _, p := range profiles {
+		items = append(items, schedulableInstructorItem{
+			ID:            p.ID,
+			DisplayName:   p.DisplayName,
+			Status:        string(p.Status),
+			IsSchedulable: p.IsSchedulable,
+		})
+	}
+	response.Success(c, gin.H{"items": items})
 }
 
 func (h *StaffHandler) getInstructor(c *gin.Context) {

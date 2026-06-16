@@ -33,6 +33,23 @@ func (r *instructorRepository) GetByBrandUserID(ctx context.Context, brandID, br
 	return toInstructorDomain(&m), nil
 }
 
+// ListSchedulable 查 active + 可排课的教练，按 display_name 升序。
+// 过滤条件与 class_session 创建时的校验保持一致（status=active AND is_schedulable）。
+func (r *instructorRepository) ListSchedulable(ctx context.Context, brandID int64) ([]*instructor.Profile, error) {
+	var ms []InstructorProfileModel
+	if err := r.db.WithContext(ctx).
+		Where("brand_id = ? AND status = ? AND is_schedulable = ?", brandID, "active", true).
+		Order("display_name ASC").
+		Find(&ms).Error; err != nil {
+		return nil, apperr.ErrInternalF("查询可排课教练失败", err)
+	}
+	out := make([]*instructor.Profile, 0, len(ms))
+	for i := range ms {
+		out = append(out, toInstructorDomain(&ms[i]))
+	}
+	return out, nil
+}
+
 // Upsert 1:1 校验：同 brand_user_id 已有时 update，没有时 insert。
 // 整段在事务里完成（含 audit.Write）。
 func (r *instructorRepository) Upsert(ctx context.Context, actorID int64, in instructor.UpsertInput) (*instructor.Profile, error) {

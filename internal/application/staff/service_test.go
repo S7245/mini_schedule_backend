@@ -157,14 +157,19 @@ func (f *fakeRoleRepo) ListRoleTemplatesWithPermissions(_ context.Context) ([]*r
 }
 
 type fakeInstrRepo struct {
-	get    *instructor.Profile
-	getErr error
-	upsErr error
-	delErr error
+	get     *instructor.Profile
+	getErr  error
+	list    []*instructor.Profile
+	listErr error
+	upsErr  error
+	delErr  error
 }
 
 func (f *fakeInstrRepo) GetByBrandUserID(_ context.Context, _, _ int64) (*instructor.Profile, error) {
 	return f.get, f.getErr
+}
+func (f *fakeInstrRepo) ListSchedulable(_ context.Context, _ int64) ([]*instructor.Profile, error) {
+	return f.list, f.listErr
 }
 func (f *fakeInstrRepo) Upsert(_ context.Context, _ int64, in instructor.UpsertInput) (*instructor.Profile, error) {
 	if f.upsErr != nil {

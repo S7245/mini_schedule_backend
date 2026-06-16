@@ -503,6 +503,14 @@ func (s *Service) ReplaceLocationAssignments(
 	return s.repo.GetWithAssignments(ctx, brandID, id)
 }
 
+// ListSchedulableInstructors 返回本 brand 下 active 且可排课的教练（排课弹窗下拉用）。
+func (s *Service) ListSchedulableInstructors(ctx context.Context, brandID, actorID int64) ([]*instructor.Profile, error) {
+	if err := s.require(ctx, brandID, actorID, "instructor.view"); err != nil {
+		return nil, err
+	}
+	return s.instructorRepo.ListSchedulable(ctx, brandID)
+}
+
 // GetInstructor 获取教练档案；如果 staff 跨 brand 则 404 STAFF_NOT_FOUND。
 func (s *Service) GetInstructor(ctx context.Context, brandID, actorID, staffID int64) (*instructor.Profile, error) {
 	if err := s.require(ctx, brandID, actorID, "instructor.view"); err != nil {

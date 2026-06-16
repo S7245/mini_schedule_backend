@@ -52,6 +52,9 @@ type UpsertInput struct {
 // Repository 教练档案仓储接口。
 type Repository interface {
 	GetByBrandUserID(ctx context.Context, brandID, brandUserID int64) (*Profile, error)
+	// ListSchedulable 返回某 brand 下「active 且可排课」的教练档案，按 display_name 升序。
+	// 用于排课弹窗的教练下拉（id 即 instructor_profile_id，与 POST /class-sessions 入参对齐）。
+	ListSchedulable(ctx context.Context, brandID int64) ([]*Profile, error)
 	Upsert(ctx context.Context, actorID int64, in UpsertInput) (*Profile, error)
 	Delete(ctx context.Context, brandID, actorID, brandUserID int64) error
 }
