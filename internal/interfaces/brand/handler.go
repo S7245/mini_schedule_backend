@@ -41,6 +41,9 @@ type Handler struct {
 	courseCategory *CourseCategoryHandler
 	courseTemplate *CourseTemplateHandler
 	classSession   *ClassSessionHandler
+
+	// Batch 12a — 门店资源
+	locationResource *LocationResourceHandler
 }
 
 // NewHandler 创建品牌 Handler
@@ -58,22 +61,24 @@ func NewHandler(
 	courseCategory *CourseCategoryHandler,
 	courseTemplate *CourseTemplateHandler,
 	classSession *ClassSessionHandler,
+	locationResource *LocationResourceHandler,
 ) *Handler {
 	return &Handler{
-		brandSvc:       brandSvc,
-		brandUserSvc:   brandUserSvc,
-		appUserSvc:     appUserSvc,
-		trainingSvc:    trainingSvc,
-		jwtSvc:         jwtSvc,
-		validator:      validation.New(),
-		onboarding:     onboarding,
-		profile:        profile,
-		location:       location,
-		staff:          staff,
-		me:             me,
-		courseCategory: courseCategory,
-		courseTemplate: courseTemplate,
-		classSession:   classSession,
+		brandSvc:         brandSvc,
+		brandUserSvc:     brandUserSvc,
+		appUserSvc:       appUserSvc,
+		trainingSvc:      trainingSvc,
+		jwtSvc:           jwtSvc,
+		validator:        validation.New(),
+		onboarding:       onboarding,
+		profile:          profile,
+		location:         location,
+		staff:            staff,
+		me:               me,
+		courseCategory:   courseCategory,
+		courseTemplate:   courseTemplate,
+		classSession:     classSession,
+		locationResource: locationResource,
 	}
 }
 
@@ -106,6 +111,9 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		}
 		if h.classSession != nil {
 			h.classSession.RegisterRoutes(auth)
+		}
+		if h.locationResource != nil {
+			h.locationResource.RegisterRoutes(auth)
 		}
 
 		// Batch 4 — 品牌资料 / onboarding / 门店

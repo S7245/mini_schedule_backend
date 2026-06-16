@@ -18,6 +18,7 @@ import (
 	appCourseCategory "github.com/zkw/mini-schedule/backend/internal/application/coursecategory"
 	appCourseTemplate "github.com/zkw/mini-schedule/backend/internal/application/coursetemplate"
 	appLocation "github.com/zkw/mini-schedule/backend/internal/application/location"
+	appLocationResource "github.com/zkw/mini-schedule/backend/internal/application/locationresource"
 	appOnboarding "github.com/zkw/mini-schedule/backend/internal/application/onboarding"
 	"github.com/zkw/mini-schedule/backend/internal/application/rbac"
 	appStaff "github.com/zkw/mini-schedule/backend/internal/application/staff"
@@ -93,6 +94,8 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewCourseCategoryRepository,
 		persistence.NewCourseTemplateRepository,
 		persistence.NewClassSessionRepository,
+		// Batch 12a
+		persistence.NewLocationResourceRepository,
 
 		// Batch 6/11 — RBAC checker + 各 service 的本地 PermissionChecker 接口绑定
 		provideRBACChecker,
@@ -103,6 +106,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		wire.Bind(new(appCourseCategory.PermissionChecker), new(*rbac.Checker)),
 		wire.Bind(new(appCourseTemplate.PermissionChecker), new(*rbac.Checker)),
 		wire.Bind(new(appClassSession.PermissionChecker), new(*rbac.Checker)),
+		wire.Bind(new(appLocationResource.PermissionChecker), new(*rbac.Checker)),
 
 		// 应用服务
 		brand.NewService,
@@ -119,6 +123,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		appCourseCategory.NewService,
 		appCourseTemplate.NewService,
 		appClassSession.NewService,
+		appLocationResource.NewService,
 
 		// Handler
 		brandHandler.NewHandler,
@@ -130,6 +135,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		brandHandler.NewCourseCategoryHandler,
 		brandHandler.NewCourseTemplateHandler,
 		brandHandler.NewClassSessionHandler,
+		brandHandler.NewLocationResourceHandler,
 		providePublicHandler,
 
 		// 路由
