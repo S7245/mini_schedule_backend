@@ -111,3 +111,17 @@ class_sessions 教练时段不重叠是 GiST EXCLUDE 约束（仅 scheduled/in_p
 
 ### onboarding 计数要和域的状态词对齐
 onboarding COUNT 的过滤状态必须跟域实际状态机一致：CourseTemplate 发布态是 `published` 不是 `active`，计数写 `active` 会永远不完成。新域落地时回头核对 onboarding_repository GetCounts 的过滤词。
+
+## 2026-06-16 Batch 12a — Location Resource 资源管理
+
+### 又一个新域照搬 location/classsession 流水线
+`locationresource` 全程 mirror：domain（Resource+Status/Type 常量+IsValid*+Repository）→ service（`require`+`checker==nil` bypass + data_scope `scopeFilterIDs`/`guardLocationInScope` on location_id）→ persistence（gorm.DeletedAt 软删 + 反范式 location_name JOIN + isUniqueViolation→RESOURCE_NAME_DUPLICATED + Delete 引用 COUNT guard + audit）→ handler（5 endpoint）→ wire 重生。带 data_scope 的域要 mirror classsession（Require+Resolve 双方法 checker），不带的 mirror coursecategory（仅 Require）。
+
+### 同表多条 EXCLUDE 约束必须按约束名分流，不能只判 23P01
+class_sessions 有两条 EXCLUDE（教练时段 + 资源时段），都报 SQLSTATE 23P01。把 `isExclusionViolation(err) bool` 重构成 `exclusionConstraint(err) (name string, ok bool)`（读 `pgErr.ConstraintName`）+ `sessionConflictError(name)`：name==`class_sessions_resource_no_overlap`→SESSION_RESOURCE_CONFLICT，否则 INSTRUCTOR。Batch 11 时只有教练一条，裸判 23P01 够用；加资源后必须分流，否则资源冲突显示「教练已排课」误导。规则：一张表多条 EXCLUDE/UNIQUE 时，错误映射要读约束名而非只读 SQLSTATE。
+
+### 容量默认值优先级写在 repo create tx 内
+单场次容量 = 显式 input > 绑定资源 capacity > course.default_capacity。在 Create tx 里先查 resource（顺带校验 active/同 location/未软删）拿 resourceCapacity，再按优先级取值。资源可选（指针 nil=不绑定），service 层把 `*id<=0` 归一为 nil 兜底误传 0。
+
+### 引用保护 COUNT 在删除 tx 内 + 跨表（场次 + 循环排课）
+资源 Delete 软删前 `countResourceActiveReferences`（scheduled/in_progress class_sessions + active recurring_schedules）>0→RESOURCE_IN_USE。镜像 LOCATION_IN_USE/COURSE_IN_USE。门店 Delete 的 CountActiveReferences 也追加 active location_resources（gorm.DeletedAt 自动加 deleted_at IS NULL）。提前把 12b 才有数据的 recurring 引用写进 COUNT，避免 12b 返工。

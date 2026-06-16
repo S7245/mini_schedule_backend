@@ -126,3 +126,16 @@ ctx-cache 那一层 key 是 `requestKey(brandID, brandUserID)`（含 brand_id，
 修（后端）：staff 域加 `InstructorProfileView`（specialties/certificates 数组化，与 `/staff/:id/instructor` 同形）+ `Staff.InstructorProfile` 字段；repo `GetWithAssignments` 调 `fetchInstructorProfileView` 内嵌（无则 nil→null）。`GetByID`（轻量存在性检查）保持不内嵌。
 **坑中坑**：repo 有两个 getter——`GetByID`（轻量，role/loc/instructor 全空）只供存在性校验，详情走 `GetWithAssignments`。给详情补字段/写详情测试都要认准 `GetWithAssignments`，测 `GetByID` 会假阴性。
 **同源教训**：又是「前端假设后端返某结构，后端没实现」（同本批 GET /instructors）。规则：前端 type 里 staff/课程等聚合根带的内嵌子对象（`instructor_profile?` 之类），后端聚合根 DTO 必须真填；起飞前对前端聚合 type 逐字段核后端是否返。
+
+## 2026-06-16 Batch 12a — code-review 修复 + 转 FR
+
+### 修：location_resource_id 误传 0 → 404（code-review）
+handler body `*int64` 无 >0 校验，client 传 `{"location_resource_id":0}` → 非 nil 指针 → repo `First WHERE id=0`→RESOURCE_NOT_FOUND 404（应是「不绑定」）。修：classsession.Service.Create 把 `*id<=0` 归一为 nil。前端虽传 null，后端兜底。
+
+### 修：资源 Update 的 Updates/re-read Where 只按 id（code-review）
+`tx.Model(&LocationResourceModel{}).Where("id = ?", id).Updates(...)` 仅靠前置 brand 域 before 读保证隔离，单点依赖。修：Updates + re-read 的 Where 都加 `AND brand_id = ?`，防御性，与 Delete 路径一致。
+
+### 转 FR（非本批阻断）
+- exclusionConstraint 字符串退化路径（errors.As 失败、仅 `strings.Contains("SQLSTATE 23P01")`）返空约束名 → sessionConflictError 默认 INSTRUCTOR，资源冲突被误标。pgx 实际恒填 ConstraintName，纯理论；但退化时不可区分。
+- 资源 Delete guard TOCTOU：COUNT 0→软删 与 并发 session-create 绑该资源 之间有窗口，可留下「active 场次引用已软删资源」。与现有 LOCATION_IN_USE/COURSE_IN_USE 同类 race（本仓约定靠 DB 约束兜并发，check-then-act guard 固有此窗口）。
+- 停用资源不挡已排未来场次（blueprint §20.5 设计：不自动取消，但「编辑场次时提示资源已停用」——该提示未实现）。
