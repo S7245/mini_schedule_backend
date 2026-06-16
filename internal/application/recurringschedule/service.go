@@ -179,12 +179,14 @@ func (s *Service) Generate(ctx context.Context, in GenerateInput) (*domainrec.Ge
 		InstructorProfileID: in.InstructorProfileID,
 		Weekdays:            weekdays,
 		StartDate:           in.StartDate,
-		EndDate:             endDate.Format(dateLayout),
-		RepeatWeeks:         in.RepeatWeeks,
-		StartTime:           fmt.Sprintf("%02d:%02d", hh, mm),
-		DurationMin:         in.DurationMin,
-		Capacity:            in.Capacity,
-		Occurrences:         occ,
+		// 保持结束条件 XOR：weeks 模式存 repeat_weeks + end_date NULL；date 模式存 end_date。
+		// （occurrence 生成已在上面用算好的 endDate，落库不回填派生 end_date。）
+		EndDate:     in.EndDate,
+		RepeatWeeks: in.RepeatWeeks,
+		StartTime:   fmt.Sprintf("%02d:%02d", hh, mm),
+		DurationMin: in.DurationMin,
+		Capacity:    in.Capacity,
+		Occurrences: occ,
 	})
 }
 
