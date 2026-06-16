@@ -197,6 +197,31 @@ func TestCountActiveReferences_IncludesScheduledSession(t *testing.T) {
 	}
 }
 
+func TestCountActiveReferences_IncludesActiveResource(t *testing.T) {
+	db := newMigratedTestDB(t)
+	locRepo := NewLocationRepository(db, nil)
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+	loc := seedLocation(t, db, brandID, "门店1")
+	resID := seedResource(t, db, brandID, loc, "活跃资源", 5)
+
+	n, err := locRepo.CountActiveReferences(context.Background(), brandID, loc)
+	if err != nil {
+		t.Fatalf("count refs: %v", err)
+	}
+	if n < 1 {
+		t.Errorf("CountActiveReferences should include active resource, got %d", n)
+	}
+
+	// 停用资源后不再计入。
+	if err := db.Exec(`UPDATE location_resources SET status='inactive' WHERE id=?`, resID).Error; err != nil {
+		t.Fatalf("disable resource: %v", err)
+	}
+	n2, _ := locRepo.CountActiveReferences(context.Background(), brandID, loc)
+	if n2 != 0 {
+		t.Errorf("inactive resource should not count, got %d", n2)
+	}
+}
+
 // seedResource 在 loc 下建一个 active 资源并返回 id。
 func seedResource(t *testing.T, db *gorm.DB, brandID, loc int64, name string, capacity int) int64 {
 	t.Helper()

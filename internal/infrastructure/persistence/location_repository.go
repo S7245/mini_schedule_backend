@@ -253,7 +253,17 @@ func (r *locationRepository) CountActiveReferences(ctx context.Context, brandID,
 		return 0, apperr.ErrInternalF("统计门店场次引用失败", err)
 	}
 
-	return staffCount + roleCount + sessionCount, nil
+	// Batch 12a：active 门店资源也纳入引用保护（软删门店会留下悬空资源）。
+	// gorm.DeletedAt 自动加 deleted_at IS NULL 过滤。
+	var resourceCount int64
+	if err := r.db.WithContext(ctx).
+		Model(&LocationResourceModel{}).
+		Where("location_id = ? AND brand_id = ? AND status = ?", locationID, brandID, "active").
+		Count(&resourceCount).Error; err != nil {
+		return 0, apperr.ErrInternalF("统计门店资源引用失败", err)
+	}
+
+	return staffCount + roleCount + sessionCount + resourceCount, nil
 }
 
 // writeLocationOperationLog 在事务内写一条门店生命周期 OperationLog。
