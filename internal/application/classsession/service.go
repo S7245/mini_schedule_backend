@@ -80,6 +80,7 @@ type CreateInput struct {
 	ActorID             int64
 	CourseID            int64
 	LocationID          int64
+	LocationResourceID  *int64 // Batch 12a：可选绑定资源。
 	InstructorProfileID int64
 	StartsAt            time.Time
 	EndsAt              time.Time
@@ -177,6 +178,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domainsession.Se
 		ActorID:             in.ActorID,
 		CourseID:            in.CourseID,
 		LocationID:          in.LocationID,
+		LocationResourceID:  in.LocationResourceID,
 		InstructorProfileID: in.InstructorProfileID,
 		StartsAt:            in.StartsAt,
 		EndsAt:              in.EndsAt,

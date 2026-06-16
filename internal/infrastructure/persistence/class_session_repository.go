@@ -10,6 +10,7 @@ import (
 
 	"github.com/zkw/mini-schedule/backend/internal/audit"
 	"github.com/zkw/mini-schedule/backend/internal/domain/classsession"
+	"github.com/zkw/mini-schedule/backend/internal/domain/locationresource"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
 
@@ -22,17 +23,33 @@ func NewClassSessionRepository(db *gorm.DB) classsession.Repository {
 	return &classSessionRepository{db: db}
 }
 
-// isExclusionViolation 判断是否 PostgreSQL EXCLUDE 约束冲突（SQLSTATE 23P01）。
-// 用于 class_sessions_instructor_no_overlap 触发时映射成业务级冲突错误，而非裸 500。
-func isExclusionViolation(err error) bool {
+// exclusionConstraint 判断是否 PostgreSQL EXCLUDE 约束冲突（SQLSTATE 23P01），
+// 并返回触发的约束名。class_sessions 有两条 EXCLUDE（教练时段 / 资源时段），都报 23P01，
+// 必须按约束名分流成不同业务错误（SESSION_INSTRUCTOR_CONFLICT vs SESSION_RESOURCE_CONFLICT），
+// 而非裸 500。pgErr.ConstraintName 为空时（极少）退化为通用冲突，由调用方按需处理。
+func exclusionConstraint(err error) (string, bool) {
 	if err == nil {
-		return false
+		return "", false
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		return pgErr.Code == "23P01"
+		if pgErr.Code == "23P01" {
+			return pgErr.ConstraintName, true
+		}
+		return "", false
 	}
-	return strings.Contains(err.Error(), "SQLSTATE 23P01")
+	if strings.Contains(err.Error(), "SQLSTATE 23P01") {
+		return "", true
+	}
+	return "", false
+}
+
+// sessionConflictError 把 EXCLUDE 约束名映射成对应业务错误。
+func sessionConflictError(constraint string) error {
+	if constraint == "class_sessions_resource_no_overlap" {
+		return apperr.NewAppError(apperr.ErrSessionResourceConflict, "该资源在此时段已被占用", 409)
+	}
+	return apperr.NewAppError(apperr.ErrSessionInstructorConflict, "该教练在此时段已有排课", 409)
 }
 
 func (r *classSessionRepository) Create(ctx context.Context, in classsession.CreateInput) (*classsession.Session, error) {
@@ -84,17 +101,39 @@ func (r *classSessionRepository) Create(ctx context.Context, in classsession.Cre
 			return apperr.NewAppError(apperr.ErrInstructorNotSchedulable, "教练不可排课", 409)
 		}
 
-		// 4) 容量默认值。
-		capacity := in.Capacity
-		if capacity <= 0 {
-			capacity = course.DefaultCapacity
+		// 4) 可选绑定资源（Batch 12a）：属本 brand + 同 location + active + 未软删。
+		//    容量默认值优先级：显式 capacity > 资源容量 > course.default_capacity。
+		var resourceCapacity int
+		if in.LocationResourceID != nil {
+			var res LocationResourceModel
+			if err := tx.Where("id = ? AND brand_id = ?", *in.LocationResourceID, in.BrandID).First(&res).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return apperr.NewAppError(apperr.ErrResourceNotFound, "资源不存在", 404)
+				}
+				return apperr.ErrInternalF("查询资源失败", err)
+			}
+			if res.LocationID != in.LocationID || res.Status != string(locationresource.StatusActive) {
+				return apperr.NewAppError(apperr.ErrResourceNotAvailable, "所选资源已停用或不属于该门店", 409)
+			}
+			resourceCapacity = res.Capacity
 		}
 
-		// 5) INSERT scheduled（EXCLUDE 约束在 scheduled/in_progress 生效）。
+		// 5) 容量默认值。
+		capacity := in.Capacity
+		if capacity <= 0 {
+			if resourceCapacity > 0 {
+				capacity = resourceCapacity
+			} else {
+				capacity = course.DefaultCapacity
+			}
+		}
+
+		// 6) INSERT scheduled（EXCLUDE 约束在 scheduled/in_progress 生效）。
 		actor := in.ActorID
 		created := ClassSessionModel{
 			BrandID:             in.BrandID,
 			LocationID:          in.LocationID,
+			LocationResourceID:  in.LocationResourceID,
 			CourseID:            in.CourseID,
 			InstructorProfileID: in.InstructorProfileID,
 			StartsAt:            in.StartsAt,
@@ -108,8 +147,8 @@ func (r *classSessionRepository) Create(ctx context.Context, in classsession.Cre
 			created.CreatedBy = &actor
 		}
 		if err := tx.Create(&created).Error; err != nil {
-			if isExclusionViolation(err) {
-				return apperr.NewAppError(apperr.ErrSessionInstructorConflict, "该教练在此时段已有排课", 409)
+			if constraint, ok := exclusionConstraint(err); ok {
+				return sessionConflictError(constraint)
 			}
 			return apperr.ErrInternalF("创建场次失败", err)
 		}
@@ -128,15 +167,17 @@ type sessionRow struct {
 	CourseTitle    string
 	LocationName   string
 	InstructorName string
+	ResourceName   string
 }
 
 func (r *classSessionRepository) baseQuery(ctx context.Context) *gorm.DB {
 	return r.db.WithContext(ctx).
 		Table("class_sessions cs").
-		Select(`cs.*, c.title AS course_title, l.name AS location_name, ip.display_name AS instructor_name`).
+		Select(`cs.*, c.title AS course_title, l.name AS location_name, ip.display_name AS instructor_name, lr.name AS resource_name`).
 		Joins("JOIN courses c ON c.id = cs.course_id").
 		Joins("JOIN locations l ON l.id = cs.location_id").
-		Joins("JOIN instructor_profiles ip ON ip.id = cs.instructor_profile_id")
+		Joins("JOIN instructor_profiles ip ON ip.id = cs.instructor_profile_id").
+		Joins("LEFT JOIN location_resources lr ON lr.id = cs.location_resource_id")
 }
 
 func (r *classSessionRepository) GetByID(ctx context.Context, brandID, id int64) (*classsession.Session, error) {
@@ -271,5 +312,6 @@ func toSessionDomain(r *sessionRow) *classsession.Session {
 		CourseTitle:         r.CourseTitle,
 		LocationName:        r.LocationName,
 		InstructorName:      r.InstructorName,
+		ResourceName:        r.ResourceName,
 	}
 }

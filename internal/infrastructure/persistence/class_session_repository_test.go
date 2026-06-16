@@ -9,6 +9,7 @@ import (
 
 	"github.com/zkw/mini-schedule/backend/internal/domain/classsession"
 	"github.com/zkw/mini-schedule/backend/internal/domain/coursetemplate"
+	"github.com/zkw/mini-schedule/backend/internal/domain/locationresource"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
 
@@ -193,5 +194,141 @@ func TestCountActiveReferences_IncludesScheduledSession(t *testing.T) {
 	}
 	if n < 1 {
 		t.Errorf("CountActiveReferences should include scheduled session, got %d", n)
+	}
+}
+
+// seedResource 在 loc 下建一个 active 资源并返回 id。
+func seedResource(t *testing.T, db *gorm.DB, brandID, loc int64, name string, capacity int) int64 {
+	t.Helper()
+	r, err := NewLocationResourceRepository(db).Create(context.Background(), locationresource.CreateInput{
+		BrandID: brandID, ActorID: 1, LocationID: loc, Name: name, Type: "classroom", Capacity: capacity,
+	})
+	if err != nil {
+		t.Fatalf("seed resource: %v", err)
+	}
+	return r.ID
+}
+
+func TestClassSession_BindResourceCapacityDefault(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewClassSessionRepository(db)
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+	loc := seedLocation(t, db, brandID, "门店1")
+	instr := seedInstructor(t, db, brandID)
+	course := seedPublishedCourseAt(t, db, brandID, loc, "瑜伽") // course default_capacity = 8
+	resID := seedResource(t, db, brandID, loc, "1号教室", 15)
+
+	start := tomorrow(9)
+	got, err := repo.Create(context.Background(), classsession.CreateInput{
+		BrandID: brandID, ActorID: 1, CourseID: course, LocationID: loc, InstructorProfileID: instr,
+		LocationResourceID: &resID, StartsAt: start, EndsAt: start.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if got.Capacity != 15 {
+		t.Errorf("capacity should default to resource capacity 15, got %d", got.Capacity)
+	}
+	if got.LocationResourceID == nil || *got.LocationResourceID != resID {
+		t.Errorf("resource not bound: %+v", got.LocationResourceID)
+	}
+	if got.ResourceName != "1号教室" {
+		t.Errorf("denorm resource_name = %q", got.ResourceName)
+	}
+}
+
+func TestClassSession_ExplicitCapacityOverridesResource(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewClassSessionRepository(db)
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+	loc := seedLocation(t, db, brandID, "门店1")
+	instr := seedInstructor(t, db, brandID)
+	course := seedPublishedCourseAt(t, db, brandID, loc, "瑜伽")
+	resID := seedResource(t, db, brandID, loc, "1号教室", 15)
+
+	start := tomorrow(9)
+	got, err := repo.Create(context.Background(), classsession.CreateInput{
+		BrandID: brandID, ActorID: 1, CourseID: course, LocationID: loc, InstructorProfileID: instr,
+		LocationResourceID: &resID, Capacity: 6, StartsAt: start, EndsAt: start.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if got.Capacity != 6 {
+		t.Errorf("explicit capacity 6 should win over resource 15, got %d", got.Capacity)
+	}
+}
+
+func TestClassSession_ResourceConflictDistinctFromInstructor(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewClassSessionRepository(db)
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+	loc := seedLocation(t, db, brandID, "门店1")
+	instr1 := seedInstructor(t, db, brandID)
+	instr2 := seedInstructor(t, db, brandID) // 不同教练，避开教练冲突
+	course := seedPublishedCourseAt(t, db, brandID, loc, "瑜伽")
+	resID := seedResource(t, db, brandID, loc, "共享教室", 10)
+
+	start := tomorrow(9)
+	if _, err := repo.Create(context.Background(), classsession.CreateInput{
+		BrandID: brandID, ActorID: 1, CourseID: course, LocationID: loc, InstructorProfileID: instr1,
+		LocationResourceID: &resID, StartsAt: start, EndsAt: start.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	// 同资源、时段重叠、不同教练 → 资源冲突（不是教练冲突）。
+	_, err := repo.Create(context.Background(), classsession.CreateInput{
+		BrandID: brandID, ActorID: 1, CourseID: course, LocationID: loc, InstructorProfileID: instr2,
+		LocationResourceID: &resID, StartsAt: start.Add(30 * time.Minute), EndsAt: start.Add(90 * time.Minute),
+	})
+	if codeOf(err) != apperr.ErrSessionResourceConflict {
+		t.Fatalf("want SESSION_RESOURCE_CONFLICT, got %v", err)
+	}
+}
+
+func TestClassSession_ResourceCrossLocationRejected(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewClassSessionRepository(db)
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+	loc1 := seedLocation(t, db, brandID, "门店1")
+	loc2 := seedLocation(t, db, brandID, "门店2")
+	instr := seedInstructor(t, db, brandID)
+	// course available at both locations
+	course := seedPublishedCourseAt(t, db, brandID, loc1, "瑜伽")
+	if err := db.Exec(`INSERT INTO course_location_availability (brand_id, course_id, location_id, is_available) VALUES (?,?,?,TRUE)`, brandID, course, loc2).Error; err != nil {
+		t.Fatalf("avail loc2: %v", err)
+	}
+	resAtLoc1 := seedResource(t, db, brandID, loc1, "门店1教室", 10)
+
+	start := tomorrow(9)
+	// 场次在门店2，却绑门店1的资源 → RESOURCE_NOT_AVAILABLE
+	_, err := repo.Create(context.Background(), classsession.CreateInput{
+		BrandID: brandID, ActorID: 1, CourseID: course, LocationID: loc2, InstructorProfileID: instr,
+		LocationResourceID: &resAtLoc1, StartsAt: start, EndsAt: start.Add(time.Hour),
+	})
+	if codeOf(err) != apperr.ErrResourceNotAvailable {
+		t.Fatalf("want RESOURCE_NOT_AVAILABLE, got %v", err)
+	}
+}
+
+func TestClassSession_InactiveResourceRejected(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewClassSessionRepository(db)
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+	loc := seedLocation(t, db, brandID, "门店1")
+	instr := seedInstructor(t, db, brandID)
+	course := seedPublishedCourseAt(t, db, brandID, loc, "瑜伽")
+	resID := seedResource(t, db, brandID, loc, "停用教室", 10)
+	if err := db.Exec(`UPDATE location_resources SET status='inactive' WHERE id=?`, resID).Error; err != nil {
+		t.Fatalf("disable resource: %v", err)
+	}
+
+	start := tomorrow(9)
+	_, err := repo.Create(context.Background(), classsession.CreateInput{
+		BrandID: brandID, ActorID: 1, CourseID: course, LocationID: loc, InstructorProfileID: instr,
+		LocationResourceID: &resID, StartsAt: start, EndsAt: start.Add(time.Hour),
+	})
+	if codeOf(err) != apperr.ErrResourceNotAvailable {
+		t.Fatalf("want RESOURCE_NOT_AVAILABLE, got %v", err)
 	}
 }

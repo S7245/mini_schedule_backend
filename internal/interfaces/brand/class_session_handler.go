@@ -96,6 +96,7 @@ func (h *ClassSessionHandler) get(c *gin.Context) {
 type createSessionBody struct {
 	CourseID            int64  `json:"course_id"`
 	LocationID          int64  `json:"location_id"`
+	LocationResourceID  *int64 `json:"location_resource_id"`
 	InstructorProfileID int64  `json:"instructor_profile_id"`
 	StartsAt            string `json:"starts_at"`
 	EndsAt              string `json:"ends_at"`
@@ -122,6 +123,7 @@ func (h *ClassSessionHandler) create(c *gin.Context) {
 		ActorID:             actorID,
 		CourseID:            body.CourseID,
 		LocationID:          body.LocationID,
+		LocationResourceID:  body.LocationResourceID,
 		InstructorProfileID: body.InstructorProfileID,
 		StartsAt:            starts.UTC(),
 		EndsAt:              ends.UTC(),

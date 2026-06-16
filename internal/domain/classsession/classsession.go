@@ -42,14 +42,16 @@ type Session struct {
 	CourseTitle    string `json:"course_title"`
 	LocationName   string `json:"location_name"`
 	InstructorName string `json:"instructor_name"`
+	ResourceName   string `json:"resource_name"` // Batch 12a：绑定资源名，未绑定为空。
 }
 
-// CreateInput 创建入参。Capacity <= 0 时由 repo 取 course.default_capacity。
+// CreateInput 创建入参。Capacity <= 0 时容量默认值优先级：绑定资源容量 > course.default_capacity。
 type CreateInput struct {
 	BrandID             int64
 	ActorID             int64
 	CourseID            int64
 	LocationID          int64
+	LocationResourceID  *int64 // Batch 12a：可选绑定资源。
 	InstructorProfileID int64
 	StartsAt            time.Time
 	EndsAt              time.Time
