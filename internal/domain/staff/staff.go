@@ -36,6 +36,27 @@ type Staff struct {
 	RoleAssignments     []RoleAssignment     `json:"role_assignments"`
 	LocationAssignments []LocationAssignment `json:"location_assignments"`
 	HasInstructor       bool                 `json:"has_instructor"`
+	// InstructorProfile 详情接口内嵌的教练档案；无档案时为 nil（序列化成 null）。
+	// 前端 staff 详情「教练档案」折叠卡直接读这个字段（has_instructor && instructor_profile）。
+	InstructorProfile *InstructorProfileView `json:"instructor_profile"`
+}
+
+// InstructorProfileView staff 详情内嵌的教练档案视图。specialties / certificates
+// 以数组返回（DB 存 CSV，repo 层 split），与 GET /staff/:id/instructor 响应形状一致。
+type InstructorProfileView struct {
+	ID                  int64     `json:"id"`
+	BrandID             int64     `json:"brand_id"`
+	BrandUserID         int64     `json:"brand_user_id"`
+	DisplayName         string    `json:"display_name"`
+	AvatarURL           string    `json:"avatar_url"`
+	Bio                 string    `json:"bio"`
+	Specialties         []string  `json:"specialties"`
+	Certificates        []string  `json:"certificates"`
+	IsVisibleToLearners bool      `json:"is_visible_to_learners"`
+	IsSchedulable       bool      `json:"is_schedulable"`
+	Status              string    `json:"status"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 // RoleAssignment Staff 的角色任职关系（brand_user_role_assignments 行）。

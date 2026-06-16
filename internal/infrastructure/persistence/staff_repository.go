@@ -86,7 +86,7 @@ func (r *staffRepository) GetByID(ctx context.Context, brandID, id int64) (*staf
 		}
 		return nil, apperr.ErrInternalF("查询员工失败", err)
 	}
-	return toStaffDomain(&m, nil, nil, false), nil
+	return toStaffDomain(&m, nil, nil, false, nil), nil
 }
 
 func (r *staffRepository) GetWithAssignments(ctx context.Context, brandID, id int64) (*staff.Staff, error) {
@@ -112,8 +112,13 @@ func (r *staffRepository) GetWithAssignments(ctx context.Context, brandID, id in
 	if err != nil {
 		return nil, err
 	}
+	// 详情内嵌教练档案（前端「教练档案」卡读 instructor_profile；缺这块导致已建档案显示「未启用」）。
+	profile, err := r.fetchInstructorProfileView(ctx, brandID, id)
+	if err != nil {
+		return nil, err
+	}
 
-	return toStaffDomain(&m, roleAssignments[id], locationAssignments[id], hasInstructor[id]), nil
+	return toStaffDomain(&m, roleAssignments[id], locationAssignments[id], hasInstructor[id], profile), nil
 }
 
 func (r *staffRepository) List(ctx context.Context, filter staff.ListFilter, offset, limit int) ([]*staff.Staff, int64, error) {
@@ -180,7 +185,7 @@ func (r *staffRepository) List(ctx context.Context, filter staff.ListFilter, off
 
 	items := make([]*staff.Staff, 0, len(rows))
 	for i := range rows {
-		items = append(items, toStaffDomain(&rows[i], roleAssignments[rows[i].ID], locationAssignments[rows[i].ID], hasInstructor[rows[i].ID]))
+		items = append(items, toStaffDomain(&rows[i], roleAssignments[rows[i].ID], locationAssignments[rows[i].ID], hasInstructor[rows[i].ID], nil))
 	}
 	return items, total, nil
 }
@@ -550,7 +555,7 @@ func (r *staffRepository) checkHasInstructor(ctx context.Context, brandID int64,
 	return out, nil
 }
 
-func toStaffDomain(m *brandUserWithOwnerModel, roles []staff.RoleAssignment, locs []staff.LocationAssignment, hasInstructor bool) *staff.Staff {
+func toStaffDomain(m *brandUserWithOwnerModel, roles []staff.RoleAssignment, locs []staff.LocationAssignment, hasInstructor bool, profile *staff.InstructorProfileView) *staff.Staff {
 	// nil slice → empty slice，确保 JSON 序列化为 `[]` 而不是被丢字段（前端 .map() 防御）。
 	if roles == nil {
 		roles = []staff.RoleAssignment{}
@@ -570,5 +575,49 @@ func toStaffDomain(m *brandUserWithOwnerModel, roles []staff.RoleAssignment, loc
 		RoleAssignments:     roles,
 		LocationAssignments: locs,
 		HasInstructor:       hasInstructor,
+		InstructorProfile:   profile,
 	}
+}
+
+// fetchInstructorProfileView 取 brand_user 的教练档案内嵌视图（无则返 nil）。
+// 详情接口用：与 GET /staff/:id/instructor 同形状（specialties/certificates split 成数组）。
+func (r *staffRepository) fetchInstructorProfileView(ctx context.Context, brandID, brandUserID int64) (*staff.InstructorProfileView, error) {
+	var m InstructorProfileModel
+	err := r.db.WithContext(ctx).
+		Where("brand_id = ? AND brand_user_id = ?", brandID, brandUserID).
+		First(&m).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, apperr.ErrInternalF("查询教练档案失败", err)
+	}
+	return &staff.InstructorProfileView{
+		ID:                  m.ID,
+		BrandID:             m.BrandID,
+		BrandUserID:         m.BrandUserID,
+		DisplayName:         m.DisplayName,
+		AvatarURL:           m.AvatarURL,
+		Bio:                 m.Bio,
+		Specialties:         csvToSlice(m.Specialties),
+		Certificates:        csvToSlice(m.Certificates),
+		IsVisibleToLearners: m.IsVisibleToLearners,
+		IsSchedulable:       m.IsSchedulable,
+		Status:              m.Status,
+		CreatedAt:           m.CreatedAt,
+		UpdatedAt:           m.UpdatedAt,
+	}, nil
+}
+
+// csvToSlice DB 的 CSV（逗号/中文逗号/分号分隔）→ []string，空串返 []（非 nil，前端 .map 安全）。
+func csvToSlice(s string) []string {
+	out := []string{}
+	for _, part := range strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == '，' || r == ';' || r == '；'
+	}) {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

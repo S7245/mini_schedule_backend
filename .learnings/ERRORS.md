@@ -118,3 +118,11 @@ ctx-cache 那一层 key 是 `requestKey(brandID, brandUserID)`（含 brand_id，
 
 ### CourseTemplate 更新传空 location_ids 误回填全部门店（code-review）
 `resolveLocationIDs` 把空 ids 当「默认全选 active 门店」——create 时正确（契约默认），但 update 时用户取消勾选全部门店保存会被静默回填成全部。修：加 `defaultAllWhenEmpty bool`，仅 create 传 true；update 传 false，尊重显式清空。
+
+## 2026-06-16 Batch 11 验收期续 — /staff/:id 详情漏内嵌 instructor_profile
+
+### 已建教练档案的员工详情页恒显示「未启用」
+`GET /staff/:id`（repo `GetWithAssignments`）只回 `has_instructor` 布尔，从不内嵌 `instructor_profile` 对象——但前端 `staff.Staff` 类型有 `instructor_profile?`，`InstructorProfileSection` 算 `hasProfile = has_instructor && profile`，profile 永远 undefined → 永远「未启用」，连「已启用/已停用」徽章和档案字段都不渲染。`packages/api/src/instructor.ts` 的 invalidate 注释甚至写明「Detail returns embedded instructor_profile」——前端早按内嵌设计且已 invalidate staff detail，是后端从 Batch 5 起就漏了这块（直到 Batch 11 排课要用教练才被翻出来）。
+修（后端）：staff 域加 `InstructorProfileView`（specialties/certificates 数组化，与 `/staff/:id/instructor` 同形）+ `Staff.InstructorProfile` 字段；repo `GetWithAssignments` 调 `fetchInstructorProfileView` 内嵌（无则 nil→null）。`GetByID`（轻量存在性检查）保持不内嵌。
+**坑中坑**：repo 有两个 getter——`GetByID`（轻量，role/loc/instructor 全空）只供存在性校验，详情走 `GetWithAssignments`。给详情补字段/写详情测试都要认准 `GetWithAssignments`，测 `GetByID` 会假阴性。
+**同源教训**：又是「前端假设后端返某结构，后端没实现」（同本批 GET /instructors）。规则：前端 type 里 staff/课程等聚合根带的内嵌子对象（`instructor_profile?` 之类），后端聚合根 DTO 必须真填；起飞前对前端聚合 type 逐字段核后端是否返。
