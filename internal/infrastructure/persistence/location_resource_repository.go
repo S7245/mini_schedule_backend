@@ -150,14 +150,15 @@ func (r *locationResourceRepository) Update(ctx context.Context, brandID, actorI
 		if len(updates) == 0 {
 			return nil
 		}
-		if err := tx.Model(&LocationResourceModel{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		// brand_id 显式收紧（防御性，不依赖前置 before 读）。
+		if err := tx.Model(&LocationResourceModel{}).Where("id = ? AND brand_id = ?", id, brandID).Updates(updates).Error; err != nil {
 			if isUniqueViolation(err) {
 				return apperr.NewAppError(apperr.ErrResourceNameDuplicated, "同门店已存在同名资源", 409)
 			}
 			return apperr.ErrInternalF("更新资源失败", err)
 		}
 		var after LocationResourceModel
-		if err := tx.Where("id = ?", id).First(&after).Error; err != nil {
+		if err := tx.Where("id = ? AND brand_id = ?", id, brandID).First(&after).Error; err != nil {
 			return apperr.ErrInternalF("查询更新后的资源失败", err)
 		}
 		return writeResourceOperationLog(tx, brandID, actorID, "location_resource_updated", id, &before, &after)

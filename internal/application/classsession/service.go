@@ -169,6 +169,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domainsession.Se
 	if in.WaitlistLimit < 0 {
 		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "候补上限不能为负", 400)
 	}
+	// 资源绑定：非正 id 视为「不绑定资源」，避免误传 0 触发 RESOURCE_NOT_FOUND。
+	if in.LocationResourceID != nil && *in.LocationResourceID <= 0 {
+		in.LocationResourceID = nil
+	}
 	// data_scope：只能在 scope 内的门店排课。
 	if err := s.guardLocationInScope(ctx, in.BrandID, in.ActorID, in.LocationID); err != nil {
 		return nil, err
