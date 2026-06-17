@@ -258,6 +258,32 @@ func TestLearner_DeleteSoftAndReferenceGuard(t *testing.T) {
 	assertAppCode(t, err, apperr.ErrLearnerInUse)
 }
 
+func TestLearner_RecreateAfterSoftDelete(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := newLearnerRepo(db)
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+	seedActiveSubscription(t, db, brandID, 100)
+
+	p, err := repo.Create(context.Background(), learner.CreateInput{BrandID: brandID, ActorID: 1, Phone: "13740000001", Nickname: "甲"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := repo.Delete(context.Background(), brandID, 1, p.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	// 000010 后：软删后用同手机号重新建档应成功（新行、新 id），不再误报 LEARNER_ALREADY_EXISTS。
+	p2, err := repo.Create(context.Background(), learner.CreateInput{BrandID: brandID, ActorID: 1, Phone: "13740000001", Nickname: "甲-重建"})
+	if err != nil {
+		t.Fatalf("recreate after soft-delete: %v", err)
+	}
+	if p2.ID == p.ID {
+		t.Fatalf("recreate should be a new row, got same id %d", p2.ID)
+	}
+	if p2.LearnerIdentityID != p.LearnerIdentityID {
+		t.Fatalf("recreate should reuse identity %d, got %d", p.LearnerIdentityID, p2.LearnerIdentityID)
+	}
+}
+
 // seedActiveEntitlement 给学员造一条 active 权益（含 entitlement_product），供 IN_USE guard 测试。
 func seedActiveEntitlement(t *testing.T, db *gorm.DB, brandID, profileID int64) {
 	t.Helper()
