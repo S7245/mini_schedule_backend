@@ -128,6 +128,20 @@ const (
 	ErrRecurringAllConflict ErrorCode = "RECURRING_ALL_CONFLICT"
 	// ErrRecurringCancelNotAllowed (409)：仅 active 状态的循环排课可取消。
 	ErrRecurringCancelNotAllowed ErrorCode = "RECURRING_CANCEL_NOT_ALLOWED"
+
+	// 学员档案管理 (Batch 13a)
+	// ErrLearnerNotFound (404)：学员不存在或越权（out-of-scope 不泄漏存在性）。
+	ErrLearnerNotFound ErrorCode = "LEARNER_NOT_FOUND"
+	// ErrLearnerAlreadyExists (409)：同品牌该手机号已有学员档案（unique(brand_id, learner_identity_id)）。
+	ErrLearnerAlreadyExists ErrorCode = "LEARNER_ALREADY_EXISTS"
+	// ErrLearnerNoDuplicated (409)：同品牌学号重复（unique(brand_id, learner_no) where not deleted）。
+	ErrLearnerNoDuplicated ErrorCode = "LEARNER_NO_DUPLICATED"
+	// ErrLearnerInUse (409)：删除学员时仍有 active 权益或未来预约引用（13b/13c 落地前恒不触发，guard 提前留）。
+	ErrLearnerInUse ErrorCode = "LEARNER_IN_USE"
+	// ErrLearnerTagNotFound (404)：tag_ids 含非本 brand 标签 / 标签不存在。
+	ErrLearnerTagNotFound ErrorCode = "LEARNER_TAG_NOT_FOUND"
+	// ErrLearnerTagNameDuplicated (409)：同品牌标签重名（unique(brand_id, name)）。
+	ErrLearnerTagNameDuplicated ErrorCode = "LEARNER_TAG_NAME_DUPLICATED"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码
