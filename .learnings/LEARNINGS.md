@@ -125,3 +125,20 @@ class_sessions 有两条 EXCLUDE（教练时段 + 资源时段），都报 SQLST
 
 ### 引用保护 COUNT 在删除 tx 内 + 跨表（场次 + 循环排课）
 资源 Delete 软删前 `countResourceActiveReferences`（scheduled/in_progress class_sessions + active recurring_schedules）>0→RESOURCE_IN_USE。镜像 LOCATION_IN_USE/COURSE_IN_USE。门店 Delete 的 CountActiveReferences 也追加 active location_resources（gorm.DeletedAt 自动加 deleted_at IS NULL）。提前把 12b 才有数据的 recurring 引用写进 COUNT，避免 12b 返工。
+
+## 2026-06-17 Batch 12b — RecurringSchedule 循环排课
+
+### 部分成功批量插入用 GORM 嵌套 tx（SAVEPOINT）逐条隔离
+外层 db.Transaction 内对每个 occurrence 再 tx.Transaction(func(stx){ stx.Create(&sess) })——GORM 在已处于事务时自动用 SAVEPOINT 包裹子事务，子事务内 23P01 只回滚到 savepoint，外层继续。撞 EXCLUDE → 记 skipped + continue；非冲突错误 return 整批 abort。靠 DB EXCLUDE + savepoint 才正确，不做先查后插 race。
+
+### 0 成功用哨兵 error 回滚 + 闭包变量带出 skipped
+全冲突不落空壳：闭包里 return errAllConflict 触发回滚；skipped/createdCount 声明在闭包外，回滚后仍可读；外层判 errors.Is(errAllConflict) → RECURRING_ALL_CONFLICT + WithDetails({skipped})（response.Error 把 Details 序列化进 data，前端读 err.data.skipped）。
+
+### DATE/TIME 列：插入用 string（赋值转换），读取用 to_char 投影
+start_date/end_date(DATE)、start_time(TIME) 用 string 插入（PG 文本→date/time 赋值 cast 成立）；读取避免 TIME→string scan 问题，baseQuery 用 to_char 投影成字符串。end_date NULL→to_char NULL→domain 转 ""。
+
+### 时区生成固定 +08:00，业务日期算在 application 层（纯函数可测）
+occurrence 展开放 service 纯函数 buildOccurrences，用 time.FixedZone("Asia/Shanghai",8*3600)（免 tzdata 依赖）；repo 只管 tx/插入/冲突。纯函数让「周一+周三×4周=8 节」「跳过已过去时刻」无需 DB 即可单测。
+
+### 复用 12a exclusionConstraint 按约束名分流
+recurring 生成复用 class_session_repository 的 exclusionConstraint(返约束名) + sessionRow/toSessionDomain（同包）。class_sessions_resource_no_overlap→resource_conflict，否则 instructor_conflict。
