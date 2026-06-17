@@ -47,6 +47,9 @@ type Handler struct {
 
 	// Batch 12b — 循环排课
 	recurringSchedule *RecurringScheduleHandler
+
+	// Batch 13a — 学员档案 + 标签
+	learner *LearnerHandler
 }
 
 // NewHandler 创建品牌 Handler
@@ -66,6 +69,7 @@ func NewHandler(
 	classSession *ClassSessionHandler,
 	locationResource *LocationResourceHandler,
 	recurringSchedule *RecurringScheduleHandler,
+	learner *LearnerHandler,
 ) *Handler {
 	return &Handler{
 		brandSvc:          brandSvc,
@@ -84,6 +88,7 @@ func NewHandler(
 		classSession:      classSession,
 		locationResource:  locationResource,
 		recurringSchedule: recurringSchedule,
+		learner:           learner,
 	}
 }
 
@@ -122,6 +127,9 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		}
 		if h.recurringSchedule != nil {
 			h.recurringSchedule.RegisterRoutes(auth)
+		}
+		if h.learner != nil {
+			h.learner.RegisterRoutes(auth)
 		}
 
 		// Batch 4 — 品牌资料 / onboarding / 门店

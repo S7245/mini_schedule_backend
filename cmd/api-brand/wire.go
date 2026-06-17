@@ -17,6 +17,7 @@ import (
 	commercialapp "github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	appCourseCategory "github.com/zkw/mini-schedule/backend/internal/application/coursecategory"
 	appCourseTemplate "github.com/zkw/mini-schedule/backend/internal/application/coursetemplate"
+	appLearner "github.com/zkw/mini-schedule/backend/internal/application/learner"
 	appLocation "github.com/zkw/mini-schedule/backend/internal/application/location"
 	appLocationResource "github.com/zkw/mini-schedule/backend/internal/application/locationresource"
 	appOnboarding "github.com/zkw/mini-schedule/backend/internal/application/onboarding"
@@ -99,6 +100,8 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewLocationResourceRepository,
 		// Batch 12b
 		persistence.NewRecurringScheduleRepository,
+		// Batch 13a
+		persistence.NewLearnerRepository,
 
 		// Batch 6/11 — RBAC checker + 各 service 的本地 PermissionChecker 接口绑定
 		provideRBACChecker,
@@ -111,6 +114,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		wire.Bind(new(appClassSession.PermissionChecker), new(*rbac.Checker)),
 		wire.Bind(new(appLocationResource.PermissionChecker), new(*rbac.Checker)),
 		wire.Bind(new(appRecurring.PermissionChecker), new(*rbac.Checker)),
+		wire.Bind(new(appLearner.PermissionChecker), new(*rbac.Checker)),
 
 		// 应用服务
 		brand.NewService,
@@ -129,6 +133,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		appClassSession.NewService,
 		appLocationResource.NewService,
 		appRecurring.NewService,
+		appLearner.NewService,
 
 		// Handler
 		brandHandler.NewHandler,
@@ -142,6 +147,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		brandHandler.NewClassSessionHandler,
 		brandHandler.NewLocationResourceHandler,
 		brandHandler.NewRecurringScheduleHandler,
+		brandHandler.NewLearnerHandler,
 		providePublicHandler,
 
 		// 路由
