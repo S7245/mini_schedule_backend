@@ -82,7 +82,10 @@ func (r *entitlementRepository) CreateProduct(ctx context.Context, in entitlemen
 	return r.GetProduct(ctx, in.BrandID, createdID)
 }
 
-// resolveProductScope 校验 scope ids：specific 时 ids ⊆ 本 brand active；all 时强制清空 ids。
+// resolveProductScope 校验 scope ids：specific 时 ids ⊆ 本 brand（存在性，不含软删）；all 时强制清空 ids。
+// 不按 active 过滤——产品创建后门店可能停用 / 课程可能归档，编辑产品（改名等）时仍要能保留既有
+// scope 而不被强拒（停用门店/归档课程对 13c 选权益只是不匹配，无害）；新增 scope 时前端只展示
+// active/published 选项，故 UI 上不会新绑停用项。门店/课程对称。
 func (r *entitlementRepository) resolveProductScope(tx *gorm.DB, brandID int64, locScope, courseScope string, locIDs, courseIDs []int64) ([]int64, []int64, error) {
 	outLoc := []int64{}
 	if locScope == entitlement.ScopeSpecific {
@@ -91,11 +94,11 @@ func (r *entitlementRepository) resolveProductScope(tx *gorm.DB, brandID int64, 
 			return nil, nil, apperr.NewAppError(apperr.ErrEntitlementScopeInvalid, "指定门店范围时至少选 1 个门店", 400)
 		}
 		var cnt int64
-		if err := tx.Model(&LocationModel{}).Where("brand_id = ? AND status = ? AND id IN ?", brandID, "active", outLoc).Count(&cnt).Error; err != nil {
+		if err := tx.Model(&LocationModel{}).Where("brand_id = ? AND id IN ?", brandID, outLoc).Count(&cnt).Error; err != nil {
 			return nil, nil, apperr.ErrInternalF("校验门店失败", err)
 		}
 		if cnt != int64(len(outLoc)) {
-			return nil, nil, apperr.NewAppError(apperr.ErrEntitlementScopeInvalid, "存在无效或未启用的门店", 400)
+			return nil, nil, apperr.NewAppError(apperr.ErrEntitlementScopeInvalid, "存在无效的门店", 400)
 		}
 	}
 	outCourse := []int64{}
@@ -435,6 +438,15 @@ type entitlementRow struct {
 }
 
 func (r *entitlementRepository) ListEntitlementsByLearner(ctx context.Context, brandID, learnerID int64) ([]*entitlement.Entitlement, error) {
+	// 学员须属本 brand（与 Grant 一致；防越权读他人/他品牌学员权益，返 404 不泄漏空列表）。
+	var cnt int64
+	if err := r.db.WithContext(ctx).Model(&BrandLearnerProfileModel{}).
+		Where("id = ? AND brand_id = ?", learnerID, brandID).Count(&cnt).Error; err != nil {
+		return nil, apperr.ErrInternalF("查询学员失败", err)
+	}
+	if cnt == 0 {
+		return nil, apperr.NewAppError(apperr.ErrLearnerNotFound, "学员不存在", 404)
+	}
 	if err := r.settleSweepLearner(ctx, brandID, learnerID); err != nil {
 		return nil, apperr.ErrInternalF("结算权益状态失败", err)
 	}

@@ -318,6 +318,36 @@ func TestEntitlement_SettleExpiredOnList(t *testing.T) {
 	}
 }
 
+func TestEntitlement_ListByLearnerNotFound(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := newEntitlementRepo(db)
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+	// 不存在的学员 → 404（不返回空列表）。
+	_, err := repo.ListEntitlementsByLearner(context.Background(), brandID, 999999)
+	assertAppCode(t, err, apperr.ErrLearnerNotFound)
+}
+
+func TestEntitlementProduct_ScopeAcceptsInactiveLocation(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := newEntitlementRepo(db)
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+	loc := seedLocation(t, db, brandID, "门店1")
+	// 门店停用后仍可保留在 scope（存在性校验，非 active）——避免编辑产品时被强拒。
+	if err := db.Exec(`UPDATE locations SET status='inactive' WHERE id=?`, loc).Error; err != nil {
+		t.Fatalf("disable loc: %v", err)
+	}
+	in := classPackInput(brandID, "卡")
+	in.LocationScope = "specific"
+	in.LocationIDs = []int64{loc}
+	p, err := repo.CreateProduct(context.Background(), in)
+	if err != nil {
+		t.Fatalf("scope inactive location should be accepted (existence-only): %v", err)
+	}
+	if len(p.LocationIDs) != 1 || p.LocationIDs[0] != loc {
+		t.Fatalf("location_ids = %v, want [%d]", p.LocationIDs, loc)
+	}
+}
+
 func TestEntitlement_StatusFreezeReactivateCancel(t *testing.T) {
 	db := newMigratedTestDB(t)
 	repo := newEntitlementRepo(db)
