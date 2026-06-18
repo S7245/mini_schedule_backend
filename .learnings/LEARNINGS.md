@@ -142,3 +142,20 @@ occurrence 展开放 service 纯函数 buildOccurrences，用 time.FixedZone("As
 
 ### 复用 12a exclusionConstraint 按约束名分流
 recurring 生成复用 class_session_repository 的 exclusionConstraint(返约束名) + sessionRow/toSessionDomain（同包）。class_sessions_resource_no_overlap→resource_conflict，否则 instructor_conflict。
+
+## 2026-06-18 Batch 13a — 学员档案（BrandLearnerProfile + 标签）
+
+### 又一个新域照搬 location/locationresource 流水线（带 data_scope + guard 注入）
+`learner` 全程 mirror：domain（Profile+Tag 实体+Status/TagStatus+IsValid*+Repository）→ service（`require`+`checker==nil` bypass + data_scope `scopeFilterIDs`/`guardLocationInScope`/`guardProfileScope` on **primary_location_id**）→ persistence（NewLearnerRepository **注入 SubscriptionGuard**，Create tx 内 `CheckAndCount(ResourceLearner)`，同 NewLocationRepository；软删 gorm.DeletedAt + 反范式 JOIN + audit）→ handler（CRUD + /status 单独 freeze 门 + /learner-tags）→ wire 重生。带配额的写域记得 mirror location（guard 注入 repo 构造器），不是 locationresource（无 guard）。
+
+### find-or-create 跨域主数据：合成占位 + 并发回查
+无微信学员：`learner_identities.wechat_open_id` NOT NULL+unique，但学员按手机号建。做法：find by phone（全局 partial-unique，跨品牌复用一个 identity）→ 没有则 INSERT 合成 `manual:<phone>`。并发下两会话同手机号都 miss → 第二个 INSERT 撞 unique → `isUniqueViolation` 回查 by phone 复用。靠 DB unique 兜并发，不锁。
+
+### 一张表多条 unique → 必须按约束名分流（同 12a EXCLUDE 经验扩到 unique）
+`brand_learner_profiles` 有 brand_identity + brand_learner_no 两条 unique，都报 23505。新增 `uniqueConstraint(err) (name, ok)`（读 `pgErr.ConstraintName`，镜像 exclusionConstraint）+ `profileConflictError` 按 name 子串分流 `LEARNER_ALREADY_EXISTS` vs `LEARNER_NO_DUPLICATED`。约束名空退化为「已存在」不裸 500。规则：一张表 >1 条 unique 时错误映射必须读约束名。
+
+### 软删表的所有 unique 索引必须带 `WHERE deleted_at IS NULL`（code-review P1）
+000003 的 `idx_brand_learner_profiles_brand_identity` 漏了 partial filter（同表 learner_no、locations 都有），导致软删学员后同手机号无法重建（撞死行报 ALREADY_EXISTS）。migration 000010 改 partial 修复 + 回归单测。规则：建带 `gorm.DeletedAt` 软删的表时，逐条核对每个 unique 索引是否 `WHERE deleted_at IS NULL`，否则删后无法重建同键记录。
+
+### 提前为后批写引用 guard（延续 12a 经验）
+`countLearnerActiveReferences`（active `learner_entitlements` + 未结束 `bookings`）在 13a 落地（两表无数据恒 0），13b/13c 有数据后自动生效，避免回改 Delete。
