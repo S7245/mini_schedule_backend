@@ -50,6 +50,9 @@ type Handler struct {
 
 	// Batch 13a — 学员档案 + 标签
 	learner *LearnerHandler
+
+	// Batch 13b — 权益产品 + 发放
+	entitlement *EntitlementHandler
 }
 
 // NewHandler 创建品牌 Handler
@@ -70,6 +73,7 @@ func NewHandler(
 	locationResource *LocationResourceHandler,
 	recurringSchedule *RecurringScheduleHandler,
 	learner *LearnerHandler,
+	entitlement *EntitlementHandler,
 ) *Handler {
 	return &Handler{
 		brandSvc:          brandSvc,
@@ -89,6 +93,7 @@ func NewHandler(
 		locationResource:  locationResource,
 		recurringSchedule: recurringSchedule,
 		learner:           learner,
+		entitlement:       entitlement,
 	}
 }
 
@@ -130,6 +135,9 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		}
 		if h.learner != nil {
 			h.learner.RegisterRoutes(auth)
+		}
+		if h.entitlement != nil {
+			h.entitlement.RegisterRoutes(auth)
 		}
 
 		// Batch 4 — 品牌资料 / onboarding / 门店
