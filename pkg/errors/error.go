@@ -142,6 +142,22 @@ const (
 	ErrLearnerTagNotFound ErrorCode = "LEARNER_TAG_NOT_FOUND"
 	// ErrLearnerTagNameDuplicated (409)：同品牌标签重名（unique(brand_id, name)）。
 	ErrLearnerTagNameDuplicated ErrorCode = "LEARNER_TAG_NAME_DUPLICATED"
+
+	// 权益产品 + 发放 (Batch 13b)
+	// ErrEntitlementProductNotFound (404)：权益产品不存在。
+	ErrEntitlementProductNotFound ErrorCode = "ENTITLEMENT_PRODUCT_NOT_FOUND"
+	// ErrEntitlementProductNameDuplicated (409)：同品牌 active 产品重名（unique(brand,name) where active）。
+	ErrEntitlementProductNameDuplicated ErrorCode = "ENTITLEMENT_PRODUCT_NAME_DUPLICATED"
+	// ErrEntitlementProductInactive (409)：从已停用产品发放。
+	ErrEntitlementProductInactive ErrorCode = "ENTITLEMENT_PRODUCT_INACTIVE"
+	// ErrEntitlementScopeInvalid (400)：location_ids/course_ids 含非本 brand active 项。
+	ErrEntitlementScopeInvalid ErrorCode = "ENTITLEMENT_SCOPE_INVALID"
+	// ErrEntitlementNotFound (404)：学员权益不存在或越权。
+	ErrEntitlementNotFound ErrorCode = "ENTITLEMENT_NOT_FOUND"
+	// ErrEntitlementInsufficient (409)：adjust 后 remaining<0，或对不限次卡调额度。
+	ErrEntitlementInsufficient ErrorCode = "ENTITLEMENT_INSUFFICIENT"
+	// ErrEntitlementNotAdjustable (409)：对 cancelled 权益 adjust/改状态。
+	ErrEntitlementNotAdjustable ErrorCode = "ENTITLEMENT_NOT_ADJUSTABLE"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码
