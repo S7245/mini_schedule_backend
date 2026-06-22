@@ -28,6 +28,7 @@ import (
 	appStaff "github.com/zkw/mini-schedule/backend/internal/application/staff"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
+	appWaitlist "github.com/zkw/mini-schedule/backend/internal/application/waitlist"
 	domainrbac "github.com/zkw/mini-schedule/backend/internal/domain/rbac"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
@@ -108,6 +109,8 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewEntitlementRepository,
 		// Batch 13c
 		persistence.NewBookingRepository,
+		// Batch 13d
+		persistence.NewWaitlistRepository,
 
 		// Batch 6/11 — RBAC checker + 各 service 的本地 PermissionChecker 接口绑定
 		provideRBACChecker,
@@ -123,6 +126,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		wire.Bind(new(appLearner.PermissionChecker), new(*rbac.Checker)),
 		wire.Bind(new(appEntitlement.PermissionChecker), new(*rbac.Checker)),
 		wire.Bind(new(appBooking.PermissionChecker), new(*rbac.Checker)),
+		wire.Bind(new(appWaitlist.PermissionChecker), new(*rbac.Checker)),
 
 		// 应用服务
 		brand.NewService,
@@ -144,6 +148,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		appLearner.NewService,
 		appEntitlement.NewService,
 		appBooking.NewService,
+		appWaitlist.NewService,
 
 		// Handler
 		brandHandler.NewHandler,
@@ -160,6 +165,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		brandHandler.NewLearnerHandler,
 		brandHandler.NewEntitlementHandler,
 		brandHandler.NewBookingHandler,
+		brandHandler.NewWaitlistHandler,
 		providePublicHandler,
 
 		// 路由
