@@ -158,6 +158,36 @@ const (
 	ErrEntitlementInsufficient ErrorCode = "ENTITLEMENT_INSUFFICIENT"
 	// ErrEntitlementNotAdjustable (409)：对 cancelled 权益 adjust/改状态。
 	ErrEntitlementNotAdjustable ErrorCode = "ENTITLEMENT_NOT_ADJUSTABLE"
+
+	// 预约下单 + 代取消 (Batch 13c)
+	// ErrSessionNotBookable (409)：场次非 scheduled（草稿/进行中/完成/取消），不可预约。
+	ErrSessionNotBookable ErrorCode = "SESSION_NOT_BOOKABLE"
+	// ErrBookingWindowClosed (409)：当前时间不在 [starts_at-book_ahead_max, starts_at-book_ahead_min] 预约窗口内。
+	ErrBookingWindowClosed ErrorCode = "BOOKING_WINDOW_CLOSED"
+	// ErrSessionFull (409)：booked_count 已达 capacity（行锁 + CHECK 兜底超卖）。
+	ErrSessionFull ErrorCode = "SESSION_FULL"
+	// ErrBookingDuplicate (409)：该学员对该场次已有非 cancelled 预约（partial unique 23505）。
+	ErrBookingDuplicate ErrorCode = "BOOKING_DUPLICATE"
+	// ErrLearnerNotBookable (409)：学员 frozen/inactive，不可预约。
+	ErrLearnerNotBookable ErrorCode = "LEARNER_NOT_BOOKABLE"
+	// ErrEntitlementNoneAvailable (409)：auto 模式下学员无任何可用权益。
+	ErrEntitlementNoneAvailable ErrorCode = "ENTITLEMENT_NONE_AVAILABLE"
+	// ErrEntitlementNotUsable (422)：manual 指定权益非 active/已过期/已耗尽/frozen/cancelled。
+	ErrEntitlementNotUsable ErrorCode = "ENTITLEMENT_NOT_USABLE"
+	// ErrEntitlementScopeMismatch (422)：manual 指定权益 location/course scope 不匹配该场次。
+	ErrEntitlementScopeMismatch ErrorCode = "ENTITLEMENT_SCOPE_MISMATCH"
+	// ErrBookingFrequencyExceeded (409)：daily/weekly/monthly/concurrent 频次超限（Details 带 which/limit/current）。
+	ErrBookingFrequencyExceeded ErrorCode = "BOOKING_FREQUENCY_EXCEEDED"
+	// ErrAssistedReasonRequired (422)：无权益占位（none 模式）缺 no_entitlement_reason。
+	ErrAssistedReasonRequired ErrorCode = "ASSISTED_REASON_REQUIRED"
+	// ErrBookingNotFound (404)：预约不存在或越权（out-of-scope 不泄漏存在性）。
+	ErrBookingNotFound ErrorCode = "BOOKING_NOT_FOUND"
+	// ErrBookingNotCancellable (409)：取消时 status≠booked（已取消/已到课/已爽约）。
+	ErrBookingNotCancellable ErrorCode = "BOOKING_NOT_CANCELLABLE"
+	// ErrBookingCancelNotAllowed (409)：场次 override allow_cancel=false。
+	ErrBookingCancelNotAllowed ErrorCode = "BOOKING_CANCEL_NOT_ALLOWED"
+	// ErrBookingCancelDeadlinePassed (409)：已超过 cancel_deadline_minutes 取消截止。
+	ErrBookingCancelDeadlinePassed ErrorCode = "BOOKING_CANCEL_DEADLINE_PASSED"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码
