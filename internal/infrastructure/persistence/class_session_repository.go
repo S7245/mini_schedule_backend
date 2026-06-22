@@ -258,7 +258,7 @@ func (r *classSessionRepository) Cancel(ctx context.Context, brandID, actorID, i
 		after.CancelReason = strings.TrimSpace(reason)
 
 		// Batch 13c 级联：取消所有 active（booked）预约 + 释放权益锁（场次取消恒退，忽略
-		// release_on_cancel）+ booked_count 归零。候补失效留 13d 扩展本级联。
+		// release_on_cancel）+ booked_count 归零。Batch 13d 扩展：再取消活跃候补（见下）。
 		var actives []BookingModel
 		if err := tx.Where("class_session_id = ? AND status = ?", id, "booked").Find(&actives).Error; err != nil {
 			return apperr.ErrInternalF("查询场次预约失败", err)
@@ -282,6 +282,14 @@ func (r *classSessionRepository) Cancel(ctx context.Context, brandID, actorID, i
 			cancelledIDs = append(cancelledIDs, b.ID)
 		}
 
+		// Batch 13d 级联：取消活跃候补（waiting/eligible → cancelled）。
+		wlRes := tx.Model(&WaitlistEntryModel{}).
+			Where("class_session_id = ? AND status IN ('waiting','eligible_to_promote')", id).
+			Updates(map[string]interface{}{"status": "cancelled", "operated_by": actorID})
+		if wlRes.Error != nil {
+			return apperr.ErrInternalF("级联取消候补失败", wlRes.Error)
+		}
+
 		updates := map[string]interface{}{"status": after.Status, "cancel_reason": after.CancelReason}
 		if len(cancelledIDs) > 0 {
 			updates["booked_count"] = 0
@@ -303,6 +311,7 @@ func (r *classSessionRepository) Cancel(ctx context.Context, brandID, actorID, i
 				"cancel_reason":        after.CancelReason,
 				"cascaded_bookings":    len(cancelledIDs),
 				"cascaded_booking_ids": cancelledIDs,
+				"cascaded_waitlist":    wlRes.RowsAffected,
 			},
 		})
 	})

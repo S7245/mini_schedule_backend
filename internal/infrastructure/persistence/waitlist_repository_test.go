@@ -192,3 +192,33 @@ func TestWaitlist_SkipCancelRejoin(t *testing.T) {
 		t.Errorf("status=%s, want cancelled", st)
 	}
 }
+
+func TestSessionCancel_CascadesWaitlist(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewWaitlistRepository(db)
+	sessRepo := NewClassSessionRepository(db)
+	f := bookingSetup(t, db)
+	instr2 := seedInstructor(t, db, f.brandID)
+	sess, _ := fullSession(t, db, f, instr2) // L1 booked 占满 cap=1
+	l2 := seedLearnerProfile(t, db, f.brandID, "wl:l2")
+	l3 := seedLearnerProfile(t, db, f.brandID, "wl:l3")
+	e2, _ := repo.Join(context.Background(), waitlist.JoinInput{BrandID: f.brandID, ActorID: f.actor, ClassSessionID: sess, BrandLearnerProfileID: l2})
+	e3, _ := repo.Join(context.Background(), waitlist.JoinInput{BrandID: f.brandID, ActorID: f.actor, ClassSessionID: sess, BrandLearnerProfileID: l3})
+
+	if _, err := sessRepo.Cancel(context.Background(), f.brandID, f.actor, sess, "场地维护"); err != nil {
+		t.Fatalf("cancel session: %v", err)
+	}
+	// 活跃候补全 cancelled。
+	for _, id := range []int64{e2.ID, e3.ID} {
+		st, _ := waitlistStatusOf(t, db, id)
+		if st != string(waitlist.StatusCancelled) {
+			t.Errorf("waitlist %d status=%s, want cancelled", id, st)
+		}
+	}
+	// L1 的 booking 也被 13c 级联取消。
+	var bookedLeft int64
+	db.Model(&BookingModel{}).Where("class_session_id = ? AND status = 'booked'", sess).Count(&bookedLeft)
+	if bookedLeft != 0 {
+		t.Errorf("场次取消后仍有 %d 个 booked", bookedLeft)
+	}
+}
