@@ -420,11 +420,173 @@ func (r *bookingRepository) loadCandidates(tx *gorm.DB, brandID, learnerID, sess
 
 // ---- TX-1 下单 ----
 
+// placeBooking 下单核心（共享）：校容量 → 学员可预约 → 解析权益(auto/manual/none) → booked_count++
+// → INSERT booking(指定 source) → 锁权益/hold/流水。调用方须已 SELECT FOR UPDATE 锁 sess 行，并自行
+// 处理场次状态/窗口/scope 等前置 + 成功后的 audit。TX-1 代预约(staff_assisted) 与 13d 候补转正
+// (waitlist_promotion) 共用，零逻辑漂移。
+func (r *bookingRepository) placeBooking(tx *gorm.DB, sess *ClassSessionModel, eff booking.EffectivePolicy, brandID, actorID, learnerID int64, mode booking.EntitlementMode, manualEntitlementID *int64, noEntitlementReason, source string, now time.Time) (*BookingModel, error) {
+	if sess.BookedCount >= sess.Capacity {
+		return nil, apperr.NewAppError(apperr.ErrSessionFull, "场次已满员", 409)
+	}
+	// 学员可预约。
+	var prof BrandLearnerProfileModel
+	if err := tx.Where("id = ? AND brand_id = ?", learnerID, brandID).First(&prof).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperr.NewAppError(apperr.ErrLearnerNotFound, "学员不存在", 404)
+		}
+		return nil, apperr.ErrInternalF("查询学员失败", err)
+	}
+	if prof.Status != string(learner.StatusActive) {
+		return nil, apperr.NewAppError(apperr.ErrLearnerNotBookable, "学员当前不可预约", 409)
+	}
+
+	// 解析权益（占位 / 自动 / 手动）。
+	var chosen *LearnerEntitlementModel
+	requiresFix := false
+	var noReason *string
+	switch mode {
+	case booking.ModeNone:
+		reason := strings.TrimSpace(noEntitlementReason)
+		if reason == "" {
+			return nil, apperr.NewAppError(apperr.ErrAssistedReasonRequired, "无权益占位须填写原因", 422)
+		}
+		requiresFix = true
+		noReason = &reason
+	case booking.ModeAuto, booking.ModeManual:
+		fc, ferr := r.frequencyCounts(tx, brandID, learnerID, sess.StartsAt)
+		if ferr != nil {
+			return nil, ferr
+		}
+		// policy 级频次与具体权益无关：超限直接报频次（避免被误判成「无可用权益」）。
+		if which, exceeded := freqExceeded(fc, eff, nil); exceeded {
+			return nil, apperr.NewAppError(apperr.ErrBookingFrequencyExceeded, "预约频次超限", 409).
+				WithDetails(map[string]any{"which": which})
+		}
+		var entID int64
+		if mode == booking.ModeManual {
+			if manualEntitlementID == nil || *manualEntitlementID <= 0 {
+				return nil, apperr.NewAppError(apperr.ErrInvalidParam, "请指定权益", 400)
+			}
+			entID = *manualEntitlementID
+		} else {
+			cands, _, cerr := r.loadCandidates(tx, brandID, learnerID, sess.LocationID, sess.CourseID, eff, fc, now)
+			if cerr != nil {
+				return nil, cerr
+			}
+			best, ok := booking.SelectAuto(cands)
+			if !ok {
+				return nil, apperr.NewAppError(apperr.ErrEntitlementNoneAvailable, "该学员无可用权益", 409)
+			}
+			entID = best.EntitlementID
+		}
+		// 锁权益行 + 校验（auto 选中项也在锁后复验，挡 remaining 竞态）。
+		var le LearnerEntitlementModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND brand_id = ? AND brand_learner_profile_id = ?", entID, brandID, learnerID).
+			First(&le).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, apperr.NewAppError(apperr.ErrEntitlementNotFound, "权益不存在", 404)
+			}
+			return nil, apperr.ErrInternalF("查询权益失败", err)
+		}
+		if !entitlementUsable(&le, now) {
+			return nil, apperr.NewAppError(apperr.ErrEntitlementNotUsable, "权益不可用（已过期/耗尽/冻结）", 422)
+		}
+		var prod EntitlementProductModel
+		if err := tx.Where("id = ? AND brand_id = ?", le.ProductID, brandID).First(&prod).Error; err != nil {
+			return nil, apperr.ErrInternalF("查询权益产品失败", err)
+		}
+		matched, merr := r.entitlementScopeMatches(tx, &prod, sess.LocationID, sess.CourseID)
+		if merr != nil {
+			return nil, apperr.ErrInternalF("校验权益适用范围失败", merr)
+		}
+		if !matched {
+			return nil, apperr.NewAppError(apperr.ErrEntitlementScopeMismatch, "权益不适用于该场次", 422)
+		}
+		if which, exceeded := freqExceeded(fc, eff, &prod); exceeded {
+			return nil, apperr.NewAppError(apperr.ErrBookingFrequencyExceeded, "预约频次超限", 409).
+				WithDetails(map[string]any{"which": which})
+		}
+		chosen = &le
+	default:
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "无效的权益模式", 400)
+	}
+
+	// booked_count++（所有校验通过后才占位）。
+	if err := tx.Model(&ClassSessionModel{}).Where("id = ?", sess.ID).
+		Update("booked_count", gorm.Expr("booked_count + 1")).Error; err != nil {
+		return nil, apperr.ErrInternalF("更新场次占用失败", err)
+	}
+	sess.BookedCount++
+	// INSERT booking。
+	actor := actorID
+	bk := BookingModel{
+		BrandID:                brandID,
+		ClassSessionID:         sess.ID,
+		BrandLearnerProfileID:  learnerID,
+		Source:                 source,
+		Status:                 string(booking.StatusBooked),
+		BookedAt:               now,
+		AssistedBy:             &actor,
+		RequiresEntitlementFix: requiresFix,
+		NoEntitlementReason:    noReason,
+	}
+	if err := tx.Create(&bk).Error; err != nil {
+		if be := bookingConflictError(err); be != nil {
+			return nil, be
+		}
+		return nil, apperr.ErrInternalF("创建预约失败", err)
+	}
+
+	// 权益路径：扣额 + hold + 流水。
+	if chosen != nil {
+		countBased := chosen.TotalCredits != nil && chosen.RemainingCredits != nil
+		delta := 0
+		var balanceAfter *int
+		upd := map[string]interface{}{"locked_credits": chosen.LockedCredits + 1}
+		settleRemaining := chosen.RemainingCredits
+		if countBased {
+			nr := *chosen.RemainingCredits - 1
+			if nr < 0 {
+				return nil, apperr.NewAppError(apperr.ErrEntitlementNotUsable, "权益余额不足", 422)
+			}
+			upd["remaining_credits"] = nr
+			delta = -1
+			balanceAfter = &nr
+			settleRemaining = &nr
+		}
+		newStatus := entitlement.SettleStatus(entitlement.StatusActive, chosen.ExpiresAt, chosen.TotalCredits, settleRemaining, now)
+		upd["status"] = string(newStatus)
+		if err := tx.Model(&LearnerEntitlementModel{}).Where("id = ?", chosen.ID).Updates(upd).Error; err != nil {
+			return nil, apperr.ErrInternalF("锁定权益失败", err)
+		}
+		hold := EntitlementHoldModel{
+			BrandID:               brandID,
+			BookingID:             bk.ID,
+			LearnerEntitlementID:  chosen.ID,
+			BrandLearnerProfileID: learnerID,
+			Credits:               1,
+			Status:                string(booking.HoldStatusHeld),
+			HeldAt:                now,
+		}
+		if err := tx.Create(&hold).Error; err != nil {
+			if be := bookingConflictError(err); be != nil {
+				return nil, be
+			}
+			return nil, apperr.ErrInternalF("锁定权益失败", err)
+		}
+		if err := insertBookingTransaction(tx, brandID, chosen.ID, learnerID, &bk.ID, &hold.ID, entitlement.ActionHold, delta, balanceAfter, "预约锁定", &actor); err != nil {
+			return nil, err
+		}
+	}
+	return &bk, nil
+}
+
 func (r *bookingRepository) Create(ctx context.Context, in booking.CreateInput) (*booking.Booking, error) {
 	var createdID int64
 	now := time.Now().UTC()
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 1. 锁场次行。
+		// 1. 锁场次行 + 前置校验（scope/状态/窗口）。
 		var sess ClassSessionModel
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("id = ? AND brand_id = ?", in.ClassSessionID, in.BrandID).First(&sess).Error; err != nil {
@@ -447,170 +609,19 @@ func (r *bookingRepository) Create(ctx context.Context, in booking.CreateInput) 
 		if !booking.WithinBookingWindow(now, sess.StartsAt, eff) {
 			return apperr.NewAppError(apperr.ErrBookingWindowClosed, "当前不在可预约时间窗口内", 409)
 		}
-		if sess.BookedCount >= sess.Capacity {
-			return apperr.NewAppError(apperr.ErrSessionFull, "场次已满员", 409)
-		}
-		// 2. 学员可预约。
-		var prof BrandLearnerProfileModel
-		if err := tx.Where("id = ? AND brand_id = ?", in.BrandLearnerProfileID, in.BrandID).First(&prof).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return apperr.NewAppError(apperr.ErrLearnerNotFound, "学员不存在", 404)
-			}
-			return apperr.ErrInternalF("查询学员失败", err)
-		}
-		if prof.Status != string(learner.StatusActive) {
-			return apperr.NewAppError(apperr.ErrLearnerNotBookable, "学员当前不可预约", 409)
-		}
-
-		// 3. 解析权益（占位 / 自动 / 手动）。
-		var chosen *LearnerEntitlementModel
-		var chosenProd *EntitlementProductModel
-		requiresFix := false
-		var noReason *string
-		switch in.EntitlementMode {
-		case booking.ModeNone:
-			reason := strings.TrimSpace(in.NoEntitlementReason)
-			if reason == "" {
-				return apperr.NewAppError(apperr.ErrAssistedReasonRequired, "无权益占位须填写原因", 422)
-			}
-			requiresFix = true
-			noReason = &reason
-		case booking.ModeAuto, booking.ModeManual:
-			fc, ferr := r.frequencyCounts(tx, in.BrandID, in.BrandLearnerProfileID, sess.StartsAt)
-			if ferr != nil {
-				return ferr
-			}
-			// policy 级频次与具体权益无关：超限直接报频次（避免被误判成「无可用权益」）。
-			if which, exceeded := freqExceeded(fc, eff, nil); exceeded {
-				return apperr.NewAppError(apperr.ErrBookingFrequencyExceeded, "预约频次超限", 409).
-					WithDetails(map[string]any{"which": which})
-			}
-			var entID int64
-			if in.EntitlementMode == booking.ModeManual {
-				if in.LearnerEntitlementID == nil || *in.LearnerEntitlementID <= 0 {
-					return apperr.NewAppError(apperr.ErrInvalidParam, "请指定权益", 400)
-				}
-				entID = *in.LearnerEntitlementID
-			} else {
-				cands, _, cerr := r.loadCandidates(tx, in.BrandID, in.BrandLearnerProfileID, sess.LocationID, sess.CourseID, eff, fc, now)
-				if cerr != nil {
-					return cerr
-				}
-				best, ok := booking.SelectAuto(cands)
-				if !ok {
-					return apperr.NewAppError(apperr.ErrEntitlementNoneAvailable, "该学员无可用权益", 409)
-				}
-				entID = best.EntitlementID
-			}
-			// 锁权益行 + 校验（auto 选中项也在锁后复验，挡 remaining 竞态）。
-			var le LearnerEntitlementModel
-			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-				Where("id = ? AND brand_id = ? AND brand_learner_profile_id = ?", entID, in.BrandID, in.BrandLearnerProfileID).
-				First(&le).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return apperr.NewAppError(apperr.ErrEntitlementNotFound, "权益不存在", 404)
-				}
-				return apperr.ErrInternalF("查询权益失败", err)
-			}
-			if !entitlementUsable(&le, now) {
-				return apperr.NewAppError(apperr.ErrEntitlementNotUsable, "权益不可用（已过期/耗尽/冻结）", 422)
-			}
-			var prod EntitlementProductModel
-			if err := tx.Where("id = ? AND brand_id = ?", le.ProductID, in.BrandID).First(&prod).Error; err != nil {
-				return apperr.ErrInternalF("查询权益产品失败", err)
-			}
-			matched, merr := r.entitlementScopeMatches(tx, &prod, sess.LocationID, sess.CourseID)
-			if merr != nil {
-				return apperr.ErrInternalF("校验权益适用范围失败", merr)
-			}
-			if !matched {
-				return apperr.NewAppError(apperr.ErrEntitlementScopeMismatch, "权益不适用于该场次", 422)
-			}
-			if which, exceeded := freqExceeded(fc, eff, &prod); exceeded {
-				return apperr.NewAppError(apperr.ErrBookingFrequencyExceeded, "预约频次超限", 409).
-					WithDetails(map[string]any{"which": which})
-			}
-			chosen = &le
-			chosenProd = &prod
-		default:
-			return apperr.NewAppError(apperr.ErrInvalidParam, "无效的权益模式", 400)
-		}
-
-		// 4. booked_count++（所有校验通过后才占位）。
-		if err := tx.Model(&ClassSessionModel{}).Where("id = ?", sess.ID).
-			Update("booked_count", gorm.Expr("booked_count + 1")).Error; err != nil {
-			return apperr.ErrInternalF("更新场次占用失败", err)
-		}
-		// 5. INSERT booking。
-		actor := in.ActorID
-		bk := BookingModel{
-			BrandID:                in.BrandID,
-			ClassSessionID:         sess.ID,
-			BrandLearnerProfileID:  in.BrandLearnerProfileID,
-			Source:                 string(booking.SourceStaffAssisted),
-			Status:                 string(booking.StatusBooked),
-			BookedAt:               now,
-			AssistedBy:             &actor,
-			RequiresEntitlementFix: requiresFix,
-			NoEntitlementReason:    noReason,
-		}
-		if err := tx.Create(&bk).Error; err != nil {
-			if be := bookingConflictError(err); be != nil {
-				return be
-			}
-			return apperr.ErrInternalF("创建预约失败", err)
+		// 2-6. 下单核心。
+		bk, err := r.placeBooking(tx, &sess, eff, in.BrandID, in.ActorID, in.BrandLearnerProfileID,
+			in.EntitlementMode, in.LearnerEntitlementID, in.NoEntitlementReason, string(booking.SourceStaffAssisted), now)
+		if err != nil {
+			return err
 		}
 		createdID = bk.ID
-
-		// 6. 权益路径：扣额 + hold + 流水。
-		if chosen != nil {
-			countBased := chosen.TotalCredits != nil && chosen.RemainingCredits != nil
-			delta := 0
-			var balanceAfter *int
-			upd := map[string]interface{}{"locked_credits": chosen.LockedCredits + 1}
-			settleRemaining := chosen.RemainingCredits
-			if countBased {
-				nr := *chosen.RemainingCredits - 1
-				if nr < 0 {
-					return apperr.NewAppError(apperr.ErrEntitlementNotUsable, "权益余额不足", 422)
-				}
-				upd["remaining_credits"] = nr
-				delta = -1
-				balanceAfter = &nr
-				settleRemaining = &nr
-			}
-			newStatus := entitlement.SettleStatus(entitlement.StatusActive, chosen.ExpiresAt, chosen.TotalCredits, settleRemaining, now)
-			upd["status"] = string(newStatus)
-			if err := tx.Model(&LearnerEntitlementModel{}).Where("id = ?", chosen.ID).Updates(upd).Error; err != nil {
-				return apperr.ErrInternalF("锁定权益失败", err)
-			}
-			hold := EntitlementHoldModel{
-				BrandID:               in.BrandID,
-				BookingID:             bk.ID,
-				LearnerEntitlementID:  chosen.ID,
-				BrandLearnerProfileID: in.BrandLearnerProfileID,
-				Credits:               1,
-				Status:                string(booking.HoldStatusHeld),
-				HeldAt:                now,
-			}
-			if err := tx.Create(&hold).Error; err != nil {
-				if be := bookingConflictError(err); be != nil {
-					return be
-				}
-				return apperr.ErrInternalF("锁定权益失败", err)
-			}
-			if err := insertBookingTransaction(tx, in.BrandID, chosen.ID, in.BrandLearnerProfileID, &bk.ID, &hold.ID, entitlement.ActionHold, delta, balanceAfter, "预约锁定", &actor); err != nil {
-				return err
-			}
-			_ = chosenProd
-		}
-
 		// 7. audit。
 		action := "booking_created"
-		if requiresFix {
+		if bk.RequiresEntitlementFix {
 			action = "booking_created_no_entitlement"
 		}
-		return writeBookingLog(tx, in.BrandID, in.ActorID, action, bk.ID, nil, &bk)
+		return writeBookingLog(tx, in.BrandID, in.ActorID, action, bk.ID, nil, bk)
 	})
 	if err != nil {
 		return nil, err
