@@ -1,6 +1,8 @@
 package booking
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,5 +150,26 @@ func TestSortCandidates_Priority(t *testing.T) {
 	// 空候选 ok=false。
 	if _, ok := SelectAuto(nil); ok {
 		t.Error("空候选应 ok=false")
+	}
+}
+
+func TestPolicyJSONSnakeCase(t *testing.T) {
+	// 回归 13c P0：Policy 必须以 snake_case 序列化（前端按 snake_case 读），
+	// 且可空限额为 nil 时显式输出 null（不可 omitempty，否则前端「不限」字段读不到）。
+	b, err := json.Marshal(DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, key := range []string{
+		`"book_ahead_min_minutes"`, `"book_ahead_max_minutes":null`,
+		`"cancel_deadline_minutes"`, `"release_on_cancel"`,
+		`"no_show_consumes_entitlement"`, `"daily_booking_limit":null`,
+		`"weekly_booking_limit":null`, `"concurrent_booking_limit":null`,
+		`"allow_waitlist"`, `"waitlist_limit"`,
+	} {
+		if !strings.Contains(s, key) {
+			t.Errorf("Policy JSON 缺 %s；实际: %s", key, s)
+		}
 	}
 }
