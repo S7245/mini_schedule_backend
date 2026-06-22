@@ -123,6 +123,52 @@ func TestEntitlementProduct_CreateSpecificScope(t *testing.T) {
 	}
 }
 
+// F1 回归：ListProducts 必须像 GetProduct 一样返回 specific 产品的 location_ids/course_ids，
+// 否则前端列表显示「0 门店」且从列表行编辑时 scope chip 不回填 → 保存校验失败。
+func TestEntitlementProduct_ListIncludesScopeIDs(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := newEntitlementRepo(db)
+	brandID, _ := seedBrandWithSystemRoles(t, db)
+	loc := seedLocation(t, db, brandID, "门店1")
+	course := seedCourse(t, db, brandID, "瑜伽")
+
+	specific := classPackInput(brandID, "专用卡")
+	specific.LocationScope, specific.CourseScope = "specific", "specific"
+	specific.LocationIDs, specific.CourseIDs = []int64{loc}, []int64{course}
+	if _, err := repo.CreateProduct(context.Background(), specific); err != nil {
+		t.Fatalf("create specific: %v", err)
+	}
+	if _, err := repo.CreateProduct(context.Background(), classPackInput(brandID, "通用卡")); err != nil {
+		t.Fatalf("create all: %v", err)
+	}
+
+	items, _, err := repo.ListProducts(context.Background(), entitlement.ProductListFilter{BrandID: brandID}, 0, 20)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var sawSpecific, sawAll bool
+	for _, p := range items {
+		switch p.Name {
+		case "专用卡":
+			sawSpecific = true
+			if len(p.LocationIDs) != 1 || p.LocationIDs[0] != loc {
+				t.Fatalf("specific product location_ids = %v, want [%d]", p.LocationIDs, loc)
+			}
+			if len(p.CourseIDs) != 1 || p.CourseIDs[0] != course {
+				t.Fatalf("specific product course_ids = %v, want [%d]", p.CourseIDs, course)
+			}
+		case "通用卡":
+			sawAll = true
+			if len(p.LocationIDs) != 0 || len(p.CourseIDs) != 0 {
+				t.Fatalf("all-scope product should have empty ids, got loc=%v course=%v", p.LocationIDs, p.CourseIDs)
+			}
+		}
+	}
+	if !sawSpecific || !sawAll {
+		t.Fatalf("missing products in list (specific=%v all=%v)", sawSpecific, sawAll)
+	}
+}
+
 func TestEntitlementProduct_ScopeInvalid(t *testing.T) {
 	db := newMigratedTestDB(t)
 	repo := newEntitlementRepo(db)

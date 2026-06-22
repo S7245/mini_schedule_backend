@@ -200,13 +200,66 @@ func (r *entitlementRepository) ListProducts(ctx context.Context, filter entitle
 	if err != nil {
 		return nil, 0, err
 	}
+	locMap, courseMap, err := r.loadScopeIDs(ctx, ids)
+	if err != nil {
+		return nil, 0, err
+	}
 	items := make([]*entitlement.Product, len(ms))
 	for i := range ms {
 		p := toProductDomain(&ms[i])
 		p.IssuedCount = counts[ms[i].ID]
+		if v := locMap[ms[i].ID]; v != nil {
+			p.LocationIDs = v
+		}
+		if v := courseMap[ms[i].ID]; v != nil {
+			p.CourseIDs = v
+		}
 		items[i] = p
 	}
 	return items, total, nil
+}
+
+// loadScopeIDs 批量取 product_id → 适用门店/课程 id 列表（specific 产品的 scope）。
+// 镜像 loadIssuedCounts：一次 IN 查询避免列表 N+1。all 范围产品无 scope 行，保持空切片。
+func (r *entitlementRepository) loadScopeIDs(ctx context.Context, productIDs []int64) (map[int64][]int64, map[int64][]int64, error) {
+	locMap := map[int64][]int64{}
+	courseMap := map[int64][]int64{}
+	if len(productIDs) == 0 {
+		return locMap, courseMap, nil
+	}
+	type locRow struct {
+		ProductID  int64
+		LocationID int64
+	}
+	var locRows []locRow
+	if err := r.db.WithContext(ctx).
+		Table("entitlement_product_locations").
+		Select("product_id, location_id").
+		Where("product_id IN ?", productIDs).
+		Order("product_id ASC, location_id ASC").
+		Scan(&locRows).Error; err != nil {
+		return nil, nil, apperr.ErrInternalF("查询产品门店范围失败", err)
+	}
+	for _, rw := range locRows {
+		locMap[rw.ProductID] = append(locMap[rw.ProductID], rw.LocationID)
+	}
+	type courseRow struct {
+		ProductID int64
+		CourseID  int64
+	}
+	var courseRows []courseRow
+	if err := r.db.WithContext(ctx).
+		Table("entitlement_product_courses").
+		Select("product_id, course_id").
+		Where("product_id IN ?", productIDs).
+		Order("product_id ASC, course_id ASC").
+		Scan(&courseRows).Error; err != nil {
+		return nil, nil, apperr.ErrInternalF("查询产品课程范围失败", err)
+	}
+	for _, rw := range courseRows {
+		courseMap[rw.ProductID] = append(courseMap[rw.ProductID], rw.CourseID)
+	}
+	return locMap, courseMap, nil
 }
 
 // loadIssuedCounts 批量取 product_id → 已发放权益数。
