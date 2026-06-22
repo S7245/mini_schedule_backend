@@ -693,12 +693,13 @@ func (r *bookingRepository) applyCancel(tx *gorm.DB, bk *BookingModel, sess *Cla
 		}
 		sess.BookedCount--
 	}
-	return r.settleHoldOnCancel(tx, bk.BrandID, bk.ID, bk.BrandLearnerProfileID, actorID, release, now)
+	return settleHoldOnCancel(tx, bk.BrandID, bk.ID, bk.BrandLearnerProfileID, actorID, release, now)
 }
 
 // settleHoldOnCancel 处理取消时的 hold：release=true 释放权益（locked--/remaining++/re-settle），
 // release=false 没收（hold→consumed，locked--/consumed++，remaining 不回退）。无 hold（占位预约）直接返回。
-func (r *bookingRepository) settleHoldOnCancel(tx *gorm.DB, brandID, bookingID, learnerID, actorID int64, release bool, now time.Time) error {
+// 自由函数（同包）：TX-2 代取消与 TX-3 场次取消级联共用。
+func settleHoldOnCancel(tx *gorm.DB, brandID, bookingID, learnerID, actorID int64, release bool, now time.Time) error {
 	var hold EntitlementHoldModel
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("booking_id = ? AND status = ?", bookingID, string(booking.HoldStatusHeld)).First(&hold).Error

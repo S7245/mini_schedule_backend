@@ -404,3 +404,110 @@ func TestBooking_PolicyUpsertAndGet(t *testing.T) {
 		t.Errorf("second upsert not applied: %+v", got)
 	}
 }
+
+// ---- TX-3 场次取消级联 ----
+
+func bookingStatusOf(t *testing.T, db *gorm.DB, id int64) (string, string) {
+	t.Helper()
+	var b BookingModel
+	db.Where("id = ?", id).First(&b)
+	cs := ""
+	if b.CancelSource != nil {
+		cs = *b.CancelSource
+	}
+	return b.Status, cs
+}
+
+func TestSessionCancel_CascadesBookings(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	sessRepo := NewClassSessionRepository(db)
+	f := bookingSetup(t, db)
+	entA := grantEnt(t, db, f.brandID, f.learner, "卡A", "class_pack", intp(10), "all", "all", nil, nil)
+	lB := seedLearnerProfile(t, db, f.brandID, "bk:B")
+	entB := grantEnt(t, db, f.brandID, lB, "月卡", "membership_card", nil, "all", "all", nil, nil)
+	lC := seedLearnerProfile(t, db, f.brandID, "bk:C")
+
+	bkA, err := repo.Create(context.Background(), booking.CreateInput{BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: f.learner, EntitlementMode: booking.ModeAuto})
+	if err != nil {
+		t.Fatalf("book A: %v", err)
+	}
+	bkB, err := repo.Create(context.Background(), booking.CreateInput{BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: lB, EntitlementMode: booking.ModeManual, LearnerEntitlementID: &entB})
+	if err != nil {
+		t.Fatalf("book B: %v", err)
+	}
+	bkC, err := repo.Create(context.Background(), booking.CreateInput{BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: lC, EntitlementMode: booking.ModeNone, NoEntitlementReason: "占位"})
+	if err != nil {
+		t.Fatalf("book C: %v", err)
+	}
+	if got := sessionBookedCount(t, db, f.session); got != 3 {
+		t.Fatalf("booked_count = %d, want 3", got)
+	}
+
+	if _, err := sessRepo.Cancel(context.Background(), f.brandID, f.actor, f.session, "场地维护"); err != nil {
+		t.Fatalf("cancel session: %v", err)
+	}
+
+	for _, id := range []int64{bkA.ID, bkB.ID, bkC.ID} {
+		st, cs := bookingStatusOf(t, db, id)
+		if st != "cancelled" || cs != "session_cancelled" {
+			t.Errorf("booking %d: status=%s cancel_source=%s, want cancelled/session_cancelled", id, st, cs)
+		}
+	}
+	if got := sessionBookedCount(t, db, f.session); got != 0 {
+		t.Errorf("级联后 booked_count = %d, want 0", got)
+	}
+	eA := mustEntitlement(t, db, entA)
+	if *eA.RemainingCredits != 10 || eA.LockedCredits != 0 {
+		t.Errorf("entA remaining=%d locked=%d, want 10/0", *eA.RemainingCredits, eA.LockedCredits)
+	}
+	eB := mustEntitlement(t, db, entB)
+	if eB.LockedCredits != 0 {
+		t.Errorf("entB locked=%d, want 0", eB.LockedCredits)
+	}
+	// hold A/B released；C 无 hold。
+	var hCount int64
+	db.Model(&EntitlementHoldModel{}).Where("booking_id IN ? AND status = 'released'", []int64{bkA.ID, bkB.ID}).Count(&hCount)
+	if hCount != 2 {
+		t.Errorf("released holds = %d, want 2", hCount)
+	}
+}
+
+func TestSessionCancel_AlwaysReleasesIgnoringPolicy(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	sessRepo := NewClassSessionRepository(db)
+	f := bookingSetup(t, db)
+	ent := grantEnt(t, db, f.brandID, f.learner, "卡", "class_pack", intp(10), "all", "all", nil, nil)
+	// 即便 release_on_cancel=false，场次取消也恒退。
+	if _, err := repo.UpsertDefaultPolicy(context.Background(), f.brandID, f.actor, booking.Policy{ReleaseOnCancel: false, AllowWaitlist: true}); err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	bk, _ := repo.Create(context.Background(), booking.CreateInput{BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: f.learner, EntitlementMode: booking.ModeAuto})
+	if _, err := sessRepo.Cancel(context.Background(), f.brandID, f.actor, f.session, "x"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	e := mustEntitlement(t, db, ent)
+	if *e.RemainingCredits != 10 || e.LockedCredits != 0 || e.ConsumedCredits != 0 {
+		t.Errorf("场次取消恒退: remaining=%d locked=%d consumed=%d, want 10/0/0", *e.RemainingCredits, e.LockedCredits, e.ConsumedCredits)
+	}
+	var h EntitlementHoldModel
+	db.Where("booking_id = ?", bk.ID).First(&h)
+	if h.Status != "released" {
+		t.Errorf("hold = %s, want released", h.Status)
+	}
+}
+
+func TestSessionCancel_NoBookings(t *testing.T) {
+	db := newMigratedTestDB(t)
+	sessRepo := NewClassSessionRepository(db)
+	f := bookingSetup(t, db)
+	// 无任何预约，回归 B11/12 单场次取消。
+	got, err := sessRepo.Cancel(context.Background(), f.brandID, f.actor, f.session, "无人取消")
+	if err != nil {
+		t.Fatalf("cancel empty: %v", err)
+	}
+	if string(got.Status) != "cancelled" {
+		t.Errorf("status = %s, want cancelled", got.Status)
+	}
+}

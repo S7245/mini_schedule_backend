@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/zkw/mini-schedule/backend/internal/audit"
 	"github.com/zkw/mini-schedule/backend/internal/domain/classsession"
@@ -236,9 +238,13 @@ func (r *classSessionRepository) List(ctx context.Context, filter classsession.L
 }
 
 func (r *classSessionRepository) Cancel(ctx context.Context, brandID, actorID, id int64, reason string) (*classsession.Session, error) {
+	now := time.Now().UTC()
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Batch 13c：锁场次行，与下单/代取消（同样 SELECT FOR UPDATE 该行）串行化，
+		// 确保级联取消进行中无新预约挤入、反之亦然。
 		var before ClassSessionModel
-		if err := tx.Where("id = ? AND brand_id = ?", id, brandID).First(&before).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND brand_id = ?", id, brandID).First(&before).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return apperr.NewAppError(apperr.ErrSessionNotFound, "场次不存在", 404)
 			}
@@ -250,11 +256,55 @@ func (r *classSessionRepository) Cancel(ctx context.Context, brandID, actorID, i
 		after := before
 		after.Status = string(classsession.StatusCancelled)
 		after.CancelReason = strings.TrimSpace(reason)
-		if err := tx.Model(&ClassSessionModel{}).Where("id = ?", id).
-			Updates(map[string]interface{}{"status": after.Status, "cancel_reason": after.CancelReason}).Error; err != nil {
+
+		// Batch 13c 级联：取消所有 active（booked）预约 + 释放权益锁（场次取消恒退，忽略
+		// release_on_cancel）+ booked_count 归零。候补失效留 13d 扩展本级联。
+		var actives []BookingModel
+		if err := tx.Where("class_session_id = ? AND status = ?", id, "booked").Find(&actives).Error; err != nil {
+			return apperr.ErrInternalF("查询场次预约失败", err)
+		}
+		cancelledIDs := make([]int64, 0, len(actives))
+		sessCancel := "session_cancelled"
+		for i := range actives {
+			b := actives[i]
+			if err := tx.Model(&BookingModel{}).Where("id = ?", b.ID).Updates(map[string]interface{}{
+				"status":        "cancelled",
+				"cancelled_at":  now,
+				"cancelled_by":  actorID,
+				"cancel_source": sessCancel,
+				"cancel_reason": after.CancelReason,
+			}).Error; err != nil {
+				return apperr.ErrInternalF("级联取消预约失败", err)
+			}
+			if err := settleHoldOnCancel(tx, brandID, b.ID, b.BrandLearnerProfileID, actorID, true, now); err != nil {
+				return err
+			}
+			cancelledIDs = append(cancelledIDs, b.ID)
+		}
+
+		updates := map[string]interface{}{"status": after.Status, "cancel_reason": after.CancelReason}
+		if len(cancelledIDs) > 0 {
+			updates["booked_count"] = 0
+			after.BookedCount = 0
+		}
+		if err := tx.Model(&ClassSessionModel{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 			return apperr.ErrInternalF("取消场次失败", err)
 		}
-		return writeSessionLog(tx, brandID, actorID, "session_cancelled", id, &before, &after)
+
+		bID := brandID
+		return audit.Write(tx, audit.Event{
+			BrandID: &bID,
+			Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: actorID},
+			Action:  "session_cancelled",
+			Target:  audit.Target{Type: "class_session", ID: id},
+			Before:  &before,
+			After: map[string]any{
+				"status":               after.Status,
+				"cancel_reason":        after.CancelReason,
+				"cascaded_bookings":    len(cancelledIDs),
+				"cascaded_booking_ids": cancelledIDs,
+			},
+		})
 	})
 	if err != nil {
 		return nil, err
