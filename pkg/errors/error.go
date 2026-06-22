@@ -188,6 +188,20 @@ const (
 	ErrBookingCancelNotAllowed ErrorCode = "BOOKING_CANCEL_NOT_ALLOWED"
 	// ErrBookingCancelDeadlinePassed (409)：已超过 cancel_deadline_minutes 取消截止。
 	ErrBookingCancelDeadlinePassed ErrorCode = "BOOKING_CANCEL_DEADLINE_PASSED"
+
+	// 候补 Waitlist (Batch 13d)
+	// ErrWaitlistNotAllowed (409)：effective policy allow_waitlist=false。
+	ErrWaitlistNotAllowed ErrorCode = "WAITLIST_NOT_ALLOWED"
+	// ErrWaitlistSessionNotFull (409)：场次未满，应直接预约而非候补。
+	ErrWaitlistSessionNotFull ErrorCode = "WAITLIST_SESSION_NOT_FULL"
+	// ErrWaitlistFull (409)：活跃候补数达 waitlist_limit（>0）。
+	ErrWaitlistFull ErrorCode = "WAITLIST_FULL"
+	// ErrWaitlistDuplicate (409)：该学员对该场次已在候补（partial unique 23505）。
+	ErrWaitlistDuplicate ErrorCode = "WAITLIST_DUPLICATE"
+	// ErrWaitlistEntryNotFound (404)：候补不存在或越权。
+	ErrWaitlistEntryNotFound ErrorCode = "WAITLIST_ENTRY_NOT_FOUND"
+	// ErrWaitlistNotPromotable (409)：转正/跳过时 status≠waiting。
+	ErrWaitlistNotPromotable ErrorCode = "WAITLIST_NOT_PROMOTABLE"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码
