@@ -176,3 +176,20 @@ expired/depleted 要落库但无定时任务：①`SettleStatus(current,expires,
 
 ### 聚合 list 端点要和 detail 填同样的内嵌字段（F1）
 `ListProducts` 漏填 `location_ids/course_ids`（只 `GetProduct` 填）→ specific 产品列表「0 门店」+ 列表行驱动的编辑弹窗 scope 不回填→保存校验失败。修：加 `loadScopeIDs` 批量回填（镜像 loadIssuedCounts，一次 IN 避 N+1）。规则（同 Batch 11 staff GetWithAssignments vs GetByID）：**前端从 list 拿到的对象会被复用去渲染/编辑时，list DTO 必须填齐 detail 同款内嵌字段（scope ids / counts / 反范式名）**，不能只在 detail 填。起飞前对「列表项是否被复用为编辑初值」逐一核。
+
+## 2026-06-22 Batch 13c — 预约下单（Booking + Hold + 取消 + 场次取消级联）
+
+### 统一「先 session 后 entitlement」锁序贯穿三事务 = 无死锁
+下单 TX-1 / 代取消 TX-2 / 场次取消级联 TX-3 全部先 `SELECT FOR UPDATE` `class_sessions` 行，再锁 `learner_entitlements`。三事务串行化同一 session 行 → 抢名额/抢课时靠行锁+`bookings` partial unique(`status<>'cancelled'`)+`class_sessions` CHECK(booked_count<=capacity)+`learner_entitlements` 非负 CHECK 兜底，**不做应用层先查后插**。场次取消回改 `class_session_repository.Cancel` 时必须给原 `First` 补 Locking，否则取消与下单不互斥。规则：任何新增「改 booked_count / 动权益」的事务都遵循 session-first 锁序。
+
+### auto 选权益：未锁快照选 + 锁行复验，挡先查后扣竞态
+`loadCandidates`（未锁，§5.7 `SortCandidates` 纯函数排序）选出 entID → 对该行 `FOR UPDATE` 重新 First + `entitlementUsable`+scope+freq 复验，remaining 竞态被复验挡住。manual 同样锁行全校验，非法报错不静默回退。
+
+### 频次「叠加取最严」+ policy 级预检
+有效限额 = `minLimitPtr(policy, product)` 取较小非 nil；月限独家来自 product（`brand_booking_policies` 无 monthly 列）。日/周/月界在 Go 算 UTC 边界（`Truncate(24h)`/周一 `(weekday+6)%7`/`time.Date(...,1)`），count 在 INSERT 新 booking **之前**取（无自身 off-by-one），concurrent 只数 `status='booked'`。**选权益前先 `freqExceeded(fc,eff,nil)` 做 policy 级预检**：policy 限额与具体权益无关，超限直接报 `BOOKING_FREQUENCY_EXCEEDED`，否则 auto 模式候选被频次过滤空后会误报 `ENTITLEMENT_NONE_AVAILABLE`。
+
+### settleHoldOnCancel 抽自由函数供 TX-2 + TX-3 复用
+取消 hold 处理（release：locked--/remaining++/re-settle/txn release Δ+1；forfeit `release_on_cancel=false`：hold→consumed/consumed++/remaining 不回退/txn consume Δ0）抽成同包自由函数（不挂 repo receiver），TX-2 代取消传 `release=eff.ReleaseOnCancel`、TX-3 场次取消传 `release=true`（恒退忽略 policy）。`insertBookingTransaction`（带 booking_id/hold_id）区别于 entitlement 包的精简 `insertEntitlementTransaction`。不限次会员卡 hold/release：`countBased=false`，remaining 保持 NULL、locked 仍 ±1、txn Δ=0 balance NULL。
+
+### 权限先 grep 000003，可能整张迁移都省掉
+13c 本预期补 booking 角色映射 migration，grep 000003 发现 `booking.view/create_assisted/cancel` 三码及全角色映射(§21.1/21.2 完全吻合)是 base 自带、存量 brand 建库即 copy → **零权限迁移**。policy 读写复用已 seed 的 `schedule.view/manage`，也不新增码。规则：新域权限先 `grep -n "'域\." migrations/000003` 看 base 有没有 seed 齐，别默认要 backfill（对比 13a/13b 是后补码才需 backfill）。
