@@ -313,7 +313,8 @@ type Repository interface {
 	List(ctx context.Context, filter ListFilter, offset, limit int) ([]*Booking, int64, error)
 	GetByID(ctx context.Context, brandID, id int64) (*Booking, error)
 	// UsableEntitlements 返回某学员对某场次的可用权益（§5.7 序，[0].AutoSelected=true）。
-	UsableEntitlements(ctx context.Context, brandID, sessionID, learnerID int64) ([]*UsableEntitlement, error)
+	// scopeLocationIDs 非 nil 时按 data_scope 守卫场次（越权 → SESSION_NOT_FOUND）。
+	UsableEntitlements(ctx context.Context, brandID, sessionID, learnerID int64, scopeLocationIDs []int64) ([]*UsableEntitlement, error)
 
 	// GetDefaultPolicy 读 brand-default 策略行（location_id IS NULL）；无行返 DefaultPolicy。
 	GetDefaultPolicy(ctx context.Context, brandID int64) (*Policy, error)

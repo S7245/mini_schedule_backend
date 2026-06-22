@@ -754,7 +754,7 @@ func (r *bookingRepository) settleHoldOnCancel(tx *gorm.DB, brandID, bookingID, 
 
 // ---- usable-entitlements ----
 
-func (r *bookingRepository) UsableEntitlements(ctx context.Context, brandID, sessionID, learnerID int64) ([]*booking.UsableEntitlement, error) {
+func (r *bookingRepository) UsableEntitlements(ctx context.Context, brandID, sessionID, learnerID int64, scopeLocationIDs []int64) ([]*booking.UsableEntitlement, error) {
 	now := time.Now().UTC()
 	var out []*booking.UsableEntitlement
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -764,6 +764,9 @@ func (r *bookingRepository) UsableEntitlements(ctx context.Context, brandID, ses
 				return apperr.NewAppError(apperr.ErrSessionNotFound, "场次不存在", 404)
 			}
 			return apperr.ErrInternalF("查询场次失败", err)
+		}
+		if scopeLocationIDs != nil && !int64InSlice(sess.LocationID, scopeLocationIDs) {
+			return apperr.NewAppError(apperr.ErrSessionNotFound, "场次不存在", 404)
 		}
 		var cnt int64
 		if err := tx.Model(&BrandLearnerProfileModel{}).Where("id = ? AND brand_id = ?", learnerID, brandID).Count(&cnt).Error; err != nil {

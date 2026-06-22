@@ -9,6 +9,7 @@ package main
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"github.com/zkw/mini-schedule/backend/internal/application/booking"
 	"github.com/zkw/mini-schedule/backend/internal/application/brand"
 	"github.com/zkw/mini-schedule/backend/internal/application/brandprofile"
 	"github.com/zkw/mini-schedule/backend/internal/application/classsession"
@@ -107,7 +108,10 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 	entitlementRepository := persistence.NewEntitlementRepository(db)
 	entitlementService := entitlement.NewService(entitlementRepository, checker)
 	entitlementHandler := brand2.NewEntitlementHandler(entitlementService)
-	handler := brand2.NewHandler(service, brandUserService, appUserService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler, staffHandler, meHandler, courseCategoryHandler, courseTemplateHandler, classSessionHandler, locationResourceHandler, recurringScheduleHandler, learnerHandler, entitlementHandler)
+	bookingRepository := persistence.NewBookingRepository(db)
+	bookingService := booking.NewService(bookingRepository, checker)
+	bookingHandler := brand2.NewBookingHandler(bookingService)
+	handler := brand2.NewHandler(service, brandUserService, appUserService, trainingService, cacheService, onboardingHandler, profileHandler, locationHandler, staffHandler, meHandler, courseCategoryHandler, courseTemplateHandler, classSessionHandler, locationResourceHandler, recurringScheduleHandler, learnerHandler, entitlementHandler, bookingHandler)
 	commercialRepository := persistence.NewCommercialRepository(db)
 	weChatPaymentAdapter := payment.NewWeChatPaymentAdapter(cfg)
 	commercialService := commercial.NewService(commercialRepository, cfg, client, weChatPaymentAdapter)
