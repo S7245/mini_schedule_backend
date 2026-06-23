@@ -193,3 +193,17 @@ expired/depleted 要落库但无定时任务：①`SettleStatus(current,expires,
 
 ### 权限先 grep 000003，可能整张迁移都省掉
 13c 本预期补 booking 角色映射 migration，grep 000003 发现 `booking.view/create_assisted/cancel` 三码及全角色映射(§21.1/21.2 完全吻合)是 base 自带、存量 brand 建库即 copy → **零权限迁移**。policy 读写复用已 seed 的 `schedule.view/manage`，也不新增码。规则：新域权限先 `grep -n "'域\." migrations/000003` 看 base 有没有 seed 齐，别默认要 backfill（对比 13a/13b 是后补码才需 backfill）。
+
+## 2026-06-22 Batch 13d — 候补（Waitlist 加入/手动转正/级联）
+
+### 抽共享核心 placeBooking 让新批复用前批下单逻辑（零回归验证）
+13d 转正 = 13c 下单的 80%。把 13c `Create` 的步骤 3-6（解析权益/booked_count++/INSERT booking(source 参数)/锁权益+hold+流水）抽成 `placeBooking(tx,sess,eff,...,source,now)`，Create(staff_assisted) 与 Promote(waitlist_promotion) 共用。**前置差异留在各调用方**：Create 保留 window 校验，Promote 不校 window（候补已承诺）；capacity 移进 placeBooking（两者都要）。保序铁律：window 仍在 capacity 前（Create 路径）。**验证零回归 = 复跑前批全部 DB 测试**（13c TestBooking_*/TestSessionCancel_* 全绿）。
+
+### 新 repo 持 *otherRepo{db} 复用其 tx-only 方法，事务边界不破
+`waitlistRepository{db, bk: &bookingRepository{db}}`，Promote 内 `r.bk.placeBooking(tx, ...)` / `r.bk.resolveEffectivePolicy(tx, ...)`。**前提**：被复用方法只用传入的 `tx`、从不触 receiver 的 `r.db`（grep `bk.db` 确认为空）。这样转正全程在 waitlist 的外层事务内，原子性完整。比把方法全改自由函数churn 小。
+
+### Join 并发 position：session 行锁串行化 + partial unique 兜底
+加入候补锁 `class_sessions` FOR UPDATE 串行化 → `position = MAX(position) FILTER(active) + 1`；`idx_waitlist_entries_session_position_active(session,position) WHERE active` 兜底。两并发 Join 不会拿同 position。检查顺序：满员→allow_waitlist→已约(BOOKING_DUPLICATE)→**已候补(WAITLIST_DUPLICATE 显式预检，先于 limit 更友好)**→waitlist_limit(0=不限)。
+
+### list 派生计数走相关子查询 + 命中既有 partial index
+场次行「候补 (N)」徽标 = session list baseQuery 加 `(SELECT COUNT(*) FROM waitlist_entries WHERE class_session_id=cs.id AND status IN('waiting','eligible'))`。命中 `idx_waitlist_entries_session_queue` partial index，分页 list（≤100 行）性能 OK。规则：list 行的关联实体计数用相关子查询 + 确保有覆盖该 WHERE 的 partial index。
