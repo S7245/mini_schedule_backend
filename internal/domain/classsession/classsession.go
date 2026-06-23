@@ -42,7 +42,8 @@ type Session struct {
 	CourseTitle    string `json:"course_title"`
 	LocationName   string `json:"location_name"`
 	InstructorName string `json:"instructor_name"`
-	ResourceName   string `json:"resource_name"` // Batch 12a：绑定资源名，未绑定为空。
+	ResourceName   string `json:"resource_name"`  // Batch 12a：绑定资源名，未绑定为空。
+	WaitlistCount  int    `json:"waitlist_count"` // Batch 13d：活跃候补人数（waiting/eligible_to_promote），用于场次行「候补 (N)」徽标。
 }
 
 // CreateInput 创建入参。Capacity <= 0 时容量默认值优先级：绑定资源容量 > course.default_capacity。

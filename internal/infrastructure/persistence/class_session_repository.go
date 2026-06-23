@@ -170,12 +170,14 @@ type sessionRow struct {
 	LocationName   string
 	InstructorName string
 	ResourceName   string
+	WaitlistCount  int
 }
 
 func (r *classSessionRepository) baseQuery(ctx context.Context) *gorm.DB {
 	return r.db.WithContext(ctx).
 		Table("class_sessions cs").
-		Select(`cs.*, c.title AS course_title, l.name AS location_name, ip.display_name AS instructor_name, lr.name AS resource_name`).
+		Select(`cs.*, c.title AS course_title, l.name AS location_name, ip.display_name AS instructor_name, lr.name AS resource_name, ` +
+			`(SELECT COUNT(*) FROM waitlist_entries we WHERE we.class_session_id = cs.id AND we.status IN ('waiting','eligible_to_promote')) AS waitlist_count`).
 		Joins("JOIN courses c ON c.id = cs.course_id").
 		Joins("JOIN locations l ON l.id = cs.location_id").
 		Joins("JOIN instructor_profiles ip ON ip.id = cs.instructor_profile_id").
@@ -372,5 +374,6 @@ func toSessionDomain(r *sessionRow) *classsession.Session {
 		LocationName:        r.LocationName,
 		InstructorName:      r.InstructorName,
 		ResourceName:        r.ResourceName,
+		WaitlistCount:       r.WaitlistCount,
 	}
 }
