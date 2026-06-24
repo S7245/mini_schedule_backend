@@ -35,6 +35,18 @@ func IsValidStatus(s string) bool {
 	return false
 }
 
+// CanAttend 报告该预约状态可否签到（标到课，Batch 13e）。booked 为正常签到；
+// pending_no_show 为「结束场次后补签纠错」——学员实际到场但员工晚标，pending_no_show→attended
+// 天然纠错，免做撤销误签到（§20.12 撤销留人工权益调整）。
+func CanAttend(s Status) bool {
+	return s == StatusBooked || s == StatusPendingNoShow
+}
+
+// CanConfirmNoShow 报告该预约状态可否确认爽约（Batch 13e）。仅 pending_no_show（须先经「结束场次」）。
+func CanConfirmNoShow(s Status) bool {
+	return s == StatusPendingNoShow
+}
+
 // Source 预约来源（与 DB CHECK bookings_source_valid 对齐）。
 // 本批只产生 staff_assisted；learner_self_service 留 Batch 14、waitlist_promotion 留 13d。
 type Source string
@@ -60,6 +72,24 @@ const (
 	HoldStatusHeld     HoldStatus = "held"
 	HoldStatusReleased HoldStatus = "released"
 	HoldStatusConsumed HoldStatus = "consumed"
+)
+
+// RecordType session_records.record_type（与 DB CHECK session_records_type_valid 对齐，Batch 13e）。
+type RecordType string
+
+const (
+	RecordAttendance RecordType = "attendance"
+	RecordNoShow     RecordType = "no_show"
+	RecordManual     RecordType = "manual"
+)
+
+// ConsumptionType entitlement_consumptions.consumption_type（与 DB CHECK 对齐，Batch 13e）。
+type ConsumptionType string
+
+const (
+	ConsumptionAttendance ConsumptionType = "attendance"
+	ConsumptionNoShow     ConsumptionType = "no_show"
+	ConsumptionManual     ConsumptionType = "manual"
 )
 
 // EntitlementMode 代预约的权益选择模式（请求级，非落库枚举）。
@@ -279,6 +309,13 @@ type UsableEntitlement struct {
 	RemainingCredits *int                    `json:"remaining_credits"`
 	ExpiresAt        time.Time               `json:"expires_at"`
 	AutoSelected     bool                    `json:"auto_selected"`
+}
+
+// EndSessionResult 结束场次结果（Batch 13e）：场次→completed + 未签到 booked 批量→pending_no_show。
+type EndSessionResult struct {
+	SessionID          int64  `json:"session_id"`
+	Status             string `json:"status"`
+	PendingNoShowCount int    `json:"pending_no_show_count"`
 }
 
 // CreateInput 代预约入参。

@@ -31,6 +31,29 @@ func TestIsValidStatusAndMode(t *testing.T) {
 	}
 }
 
+func TestCanAttendAndConfirmNoShow(t *testing.T) {
+	// 签到接受 booked（正常）与 pending_no_show（结束场次后补签纠错）。
+	for _, s := range []Status{StatusBooked, StatusPendingNoShow} {
+		if !CanAttend(s) {
+			t.Errorf("CanAttend(%q)=false, want true", s)
+		}
+	}
+	for _, s := range []Status{StatusCancelled, StatusAttended, StatusNoShow} {
+		if CanAttend(s) {
+			t.Errorf("CanAttend(%q)=true, want false", s)
+		}
+	}
+	// 确认爽约仅接受 pending_no_show。
+	if !CanConfirmNoShow(StatusPendingNoShow) {
+		t.Error("CanConfirmNoShow(pending_no_show)=false, want true")
+	}
+	for _, s := range []Status{StatusBooked, StatusCancelled, StatusAttended, StatusNoShow} {
+		if CanConfirmNoShow(s) {
+			t.Errorf("CanConfirmNoShow(%q)=true, want false", s)
+		}
+	}
+}
+
 func TestResolveEffectivePolicy(t *testing.T) {
 	base := Policy{
 		BookAheadMinMinutes:   30,

@@ -202,6 +202,16 @@ const (
 	ErrWaitlistEntryNotFound ErrorCode = "WAITLIST_ENTRY_NOT_FOUND"
 	// ErrWaitlistNotPromotable (409)：转正/跳过时 status≠waiting。
 	ErrWaitlistNotPromotable ErrorCode = "WAITLIST_NOT_PROMOTABLE"
+
+	// 签到 / 履约 / 爽约 Attendance (Batch 13e)
+	// ErrAttendanceAlreadyMarked (409)：重复签到（booking 已 attended，或 attendance/consumption unique 23505）。
+	ErrAttendanceAlreadyMarked ErrorCode = "ATTENDANCE_ALREADY_MARKED"
+	// ErrBookingNotAttendable (409)：签到时 booking status ∉ {booked, pending_no_show}（已取消/已爽约）。
+	ErrBookingNotAttendable ErrorCode = "BOOKING_NOT_ATTENDABLE"
+	// ErrSessionNotEndable (409)：结束场次时 session status ∉ {scheduled, in_progress}（草稿/已完成/已取消）。
+	ErrSessionNotEndable ErrorCode = "SESSION_NOT_ENDABLE"
+	// ErrBookingNotConfirmable (409)：确认爽约时 booking status ≠ pending_no_show。
+	ErrBookingNotConfirmable ErrorCode = "BOOKING_NOT_CONFIRMABLE"
 )
 
 // AppError 自定义错误类型，包含业务错误码、用户提示消息和 HTTP 状态码
