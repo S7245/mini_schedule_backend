@@ -207,3 +207,20 @@ expired/depleted 要落库但无定时任务：①`SettleStatus(current,expires,
 
 ### list 派生计数走相关子查询 + 命中既有 partial index
 场次行「候补 (N)」徽标 = session list baseQuery 加 `(SELECT COUNT(*) FROM waitlist_entries WHERE class_session_id=cs.id AND status IN('waiting','eligible'))`。命中 `idx_waitlist_entries_session_queue` partial index，分页 list（≤100 行）性能 OK。规则：list 行的关联实体计数用相关子查询 + 确保有覆盖该 WHERE 的 partial index。
+
+## 2026-06-24 Batch 13e — 签到/履约/爽约（consume 收口 + 零 migration）
+
+### settleHoldForOutcome：consume 收口 = forfeit 骨架 + consumption 行
+新 sibling 自由函数与取消的 settleHoldOnCancel 并列（cancel vs 履约终态语义不同，不混用）。一个 `consume bool` flag 覆盖三调用：attendance / no_show-consume（consume=true，held→consumed/locked--/consumed++/remaining 不变 + 写 entitlement_consumptions(unique hold→23505 按约束名 consumptions_hold 分流 ATTENDANCE_ALREADY_MARKED) + 关联 attendanceID + txn 带 consumption_id）/ no_show-release（consume=false，镜像取消 release）。
+
+### insertBookingTransaction 扩参后必复跑前批全测试
+签名加 consumption_id 时 3 处既有 cancel 调用点传 nil；改完立即跑 13c TestBooking_*/TestSessionCancel_* + 13d TestWaitlist_* 全绿才提交（同 13d placeBooking 抽取纪律）。
+
+### 结束场次批量 sweep 用 RowsAffected；attend/end/no_show 不动 booked_count
+EndSession 锁 session 校 scheduled/in_progress→completed→`UPDATE bookings SET pending_no_show WHERE status='booked'` 的 RowsAffected 即 count。只有取消退名额，占用事实不变。
+
+### TX-3 零改动靠状态机闭合证明，不靠新代码
+completed 不可取消（Cancel 仅 scheduled/in_progress）+ 仅 EndSession 产 pending_no_show → 该态永在 completed 场次 → TX-3 的 status='booked' 查询永不触及。跨批回改先证伪「需要改」。
+
+### baseQuery hold join 过滤 released → 退课响应 hold=null（与 13c 一致，非 bug）
+`LEFT JOIN entitlement_holds ... AND h.status <> 'released'`：consumed 现身（attend/扣课响应正确），released 被过滤（爽约退课 / 取消退课响应 hold=null）。既有约定；前端据 requires_entitlement_fix + 终态推断区分。要直出 released 须改 join(DISTINCT ON) 并回归 13c。
