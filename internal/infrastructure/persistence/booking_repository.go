@@ -575,7 +575,7 @@ func (r *bookingRepository) placeBooking(tx *gorm.DB, sess *ClassSessionModel, e
 			}
 			return nil, apperr.ErrInternalF("锁定权益失败", err)
 		}
-		if err := insertBookingTransaction(tx, brandID, chosen.ID, learnerID, &bk.ID, &hold.ID, entitlement.ActionHold, delta, balanceAfter, "预约锁定", &actor); err != nil {
+		if err := insertBookingTransaction(tx, brandID, chosen.ID, learnerID, &bk.ID, &hold.ID, nil, entitlement.ActionHold, delta, balanceAfter, "预约锁定", &actor); err != nil {
 			return nil, err
 		}
 	}
@@ -750,7 +750,7 @@ func settleHoldOnCancel(tx *gorm.DB, brandID, bookingID, learnerID, actorID int6
 			Updates(map[string]interface{}{"status": string(booking.HoldStatusReleased), "released_at": now}).Error; err != nil {
 			return apperr.ErrInternalF("释放权益锁定失败", err)
 		}
-		return insertBookingTransaction(tx, brandID, le.ID, learnerID, &bookingID, &hold.ID, entitlement.ActionRelease, delta, balanceAfter, "取消释放", &actor)
+		return insertBookingTransaction(tx, brandID, le.ID, learnerID, &bookingID, &hold.ID, nil, entitlement.ActionRelease, delta, balanceAfter, "取消释放", &actor)
 	}
 	// forfeit：没收已扣的课时。
 	leUpd["consumed_credits"] = le.ConsumedCredits + 1
@@ -761,7 +761,170 @@ func settleHoldOnCancel(tx *gorm.DB, brandID, bookingID, learnerID, actorID int6
 		Updates(map[string]interface{}{"status": string(booking.HoldStatusConsumed), "consumed_at": now}).Error; err != nil {
 		return apperr.ErrInternalF("没收权益锁定失败", err)
 	}
-	return insertBookingTransaction(tx, brandID, le.ID, learnerID, &bookingID, &hold.ID, entitlement.ActionConsume, 0, le.RemainingCredits, "取消没收", &actor)
+	return insertBookingTransaction(tx, brandID, le.ID, learnerID, &bookingID, &hold.ID, nil, entitlement.ActionConsume, 0, le.RemainingCredits, "取消没收", &actor)
+}
+
+// ---- TX-A 签到 / TX-C 爽约：履约结算 hold（Batch 13e）----
+
+// settleHoldForOutcome 履约结算 hold（签到到课 / 爽约扣课 / 爽约退课）。与取消的 settleHoldOnCancel
+// 并列但语义不同：本函数用于「到课/爽约」终态，consume 路径额外写 entitlement_consumptions（unique(hold)
+// 防重复消费同 hold）并把 txn 关联 consumption_id。无 hold（占位预约）→ 返回 nil，不结算。
+//   - consume=true：held→consumed / locked-- / consumed++（remaining 不变，下单时已扣）+ consumption 行 + txn(action)
+//   - consume=false：held→released / locked-- / remaining++ + txn(release)（爽约不扣课，无 consumption）
+// consumptionType / attendanceID 仅 consume 路径用；release 路径忽略。
+func settleHoldForOutcome(tx *gorm.DB, brandID, bookingID, learnerID, actorID int64, consume bool,
+	consumptionType booking.ConsumptionType, attendanceID *int64, action entitlement.Action, note string, now time.Time) error {
+	var hold EntitlementHoldModel
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("booking_id = ? AND status = ?", bookingID, string(booking.HoldStatusHeld)).First(&hold).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil // 占位预约无 hold，不结算。
+	}
+	if err != nil {
+		return apperr.ErrInternalF("查询权益锁定失败", err)
+	}
+	var le LearnerEntitlementModel
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ?", hold.LearnerEntitlementID).First(&le).Error; err != nil {
+		return apperr.ErrInternalF("查询权益失败", err)
+	}
+	countBased := le.TotalCredits != nil && le.RemainingCredits != nil
+	leUpd := map[string]interface{}{}
+	if le.LockedCredits > 0 {
+		leUpd["locked_credits"] = le.LockedCredits - 1
+	}
+	actor := actorID
+
+	if !consume {
+		// 释放（爽约不扣课）：locked--/remaining++/re-settle/hold→released/txn release。
+		delta := 0
+		var balanceAfter *int
+		settleRemaining := le.RemainingCredits
+		if countBased {
+			nr := *le.RemainingCredits + 1
+			leUpd["remaining_credits"] = nr
+			delta = 1
+			balanceAfter = &nr
+			settleRemaining = &nr
+		}
+		leUpd["status"] = string(entitlement.SettleStatus(entitlement.Status(le.Status), le.ExpiresAt, le.TotalCredits, settleRemaining, now))
+		if err := tx.Model(&LearnerEntitlementModel{}).Where("id = ?", le.ID).Updates(leUpd).Error; err != nil {
+			return apperr.ErrInternalF("释放权益失败", err)
+		}
+		if err := tx.Model(&EntitlementHoldModel{}).Where("id = ?", hold.ID).
+			Updates(map[string]interface{}{"status": string(booking.HoldStatusReleased), "released_at": now}).Error; err != nil {
+			return apperr.ErrInternalF("释放权益锁定失败", err)
+		}
+		return insertBookingTransaction(tx, brandID, le.ID, learnerID, &bookingID, &hold.ID, nil, entitlement.ActionRelease, delta, balanceAfter, note, &actor)
+	}
+
+	// 消耗（到课 / 爽约扣课）：locked--/consumed++（remaining 不变）/re-settle/hold→consumed。
+	leUpd["consumed_credits"] = le.ConsumedCredits + 1
+	leUpd["status"] = string(entitlement.SettleStatus(entitlement.Status(le.Status), le.ExpiresAt, le.TotalCredits, le.RemainingCredits, now))
+	if err := tx.Model(&LearnerEntitlementModel{}).Where("id = ?", le.ID).Updates(leUpd).Error; err != nil {
+		return apperr.ErrInternalF("消耗权益失败", err)
+	}
+	if err := tx.Model(&EntitlementHoldModel{}).Where("id = ?", hold.ID).
+		Updates(map[string]interface{}{"status": string(booking.HoldStatusConsumed), "consumed_at": now}).Error; err != nil {
+		return apperr.ErrInternalF("消耗权益锁定失败", err)
+	}
+	// entitlement_consumptions（unique(entitlement_hold_id) 防重复消费同 hold → 23505）。
+	cons := EntitlementConsumptionModel{
+		BrandID: brandID, EntitlementHoldID: &hold.ID, LearnerEntitlementID: le.ID, BookingID: bookingID,
+		AttendanceID: attendanceID, BrandLearnerProfileID: learnerID, Credits: hold.Credits,
+		ConsumptionType: string(consumptionType), ConsumedAt: now, OperatedBy: &actor,
+	}
+	if err := tx.Create(&cons).Error; err != nil {
+		if name, ok := uniqueConstraint(err); ok && strings.Contains(name, "consumptions_hold") {
+			return apperr.NewAppError(apperr.ErrAttendanceAlreadyMarked, "该预约已结算", 409)
+		}
+		return apperr.ErrInternalF("写入权益消耗失败", err)
+	}
+	return insertBookingTransaction(tx, brandID, le.ID, learnerID, &bookingID, &hold.ID, &cons.ID, action, 0, le.RemainingCredits, note, &actor)
+}
+
+// ---- TX-A 签到（标到课）----
+
+// Attend booked|pending_no_show → attended + attendance_records + hold consume + session_records。
+// 占位预约（requires_entitlement_fix，无 hold）仍 attended + records，但不消费（§13.2 留人工补）。
+func (r *bookingRepository) Attend(ctx context.Context, brandID, actorID, id int64, note string) (*booking.Booking, error) {
+	now := time.Now().UTC()
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var pre BookingModel
+		if err := tx.Where("id = ? AND brand_id = ?", id, brandID).First(&pre).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrBookingNotFound, "预约不存在", 404)
+			}
+			return apperr.ErrInternalF("查询预约失败", err)
+		}
+		// 锁序：先场次后预约（与下单/取消一致）。
+		var sess ClassSessionModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ?", pre.ClassSessionID).First(&sess).Error; err != nil {
+			return apperr.ErrInternalF("查询场次失败", err)
+		}
+		var bk BookingModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND brand_id = ?", id, brandID).First(&bk).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrBookingNotFound, "预约不存在", 404)
+			}
+			return apperr.ErrInternalF("查询预约失败", err)
+		}
+		if bk.Status == string(booking.StatusAttended) {
+			return apperr.NewAppError(apperr.ErrAttendanceAlreadyMarked, "该预约已签到", 409)
+		}
+		if !booking.CanAttend(booking.Status(bk.Status)) {
+			return apperr.NewAppError(apperr.ErrBookingNotAttendable, "该预约当前不可签到", 409)
+		}
+		if sess.Status == "cancelled" {
+			return apperr.NewAppError(apperr.ErrBookingNotAttendable, "场次已取消，不可签到", 409)
+		}
+		after := bk
+		after.Status = string(booking.StatusAttended)
+		if err := tx.Model(&BookingModel{}).Where("id = ?", bk.ID).Update("status", after.Status).Error; err != nil {
+			return apperr.ErrInternalF("更新预约状态失败", err)
+		}
+		var notePtr *string
+		if n := strings.TrimSpace(note); n != "" {
+			notePtr = &n
+		}
+		// attendance_records（unique(booking) 防重签 → 23505）。
+		att := AttendanceRecordModel{
+			BrandID: brandID, BookingID: bk.ID, ClassSessionID: sess.ID,
+			BrandLearnerProfileID: bk.BrandLearnerProfileID, MarkedBy: &actorID, AttendedAt: now, Note: notePtr,
+		}
+		if err := tx.Create(&att).Error; err != nil {
+			if name, ok := uniqueConstraint(err); ok && strings.Contains(name, "attendance_records_booking") {
+				return apperr.NewAppError(apperr.ErrAttendanceAlreadyMarked, "该预约已签到", 409)
+			}
+			return apperr.ErrInternalF("写入签到记录失败", err)
+		}
+		// hold 收口：consume（占位无 hold→跳过，不消费）。
+		if err := settleHoldForOutcome(tx, brandID, bk.ID, bk.BrandLearnerProfileID, actorID, true,
+			booking.ConsumptionAttendance, &att.ID, entitlement.ActionConsume, "到课消费", now); err != nil {
+			return err
+		}
+		// session_records（履约）。
+		var instrPtr *int64
+		if sess.InstructorProfileID > 0 {
+			instr := sess.InstructorProfileID
+			instrPtr = &instr
+		}
+		rec := SessionRecordModel{
+			BrandID: brandID, ClassSessionID: sess.ID, BookingID: bk.ID, AttendanceID: &att.ID,
+			BrandLearnerProfileID: bk.BrandLearnerProfileID, InstructorProfileID: instrPtr,
+			RecordType: string(booking.RecordAttendance), Note: notePtr,
+		}
+		if err := tx.Create(&rec).Error; err != nil {
+			return apperr.ErrInternalF("写入履约记录失败", err)
+		}
+		return writeBookingLog(tx, brandID, actorID, "booking_attended", bk.ID, &bk, &after)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.GetByID(ctx, brandID, id)
 }
 
 // ---- usable-entitlements ----
@@ -897,13 +1060,14 @@ func (r *bookingRepository) UpsertDefaultPolicy(ctx context.Context, brandID, ac
 // ---- 共享辅助 ----
 
 // insertBookingTransaction 写权益流水（带 booking_id / hold_id 关联，区别于 entitlement 包的精简版）。
-func insertBookingTransaction(tx *gorm.DB, brandID, entitlementID, learnerID int64, bookingID, holdID *int64, action entitlement.Action, delta int, balanceAfter *int, note string, operatedBy *int64) error {
+func insertBookingTransaction(tx *gorm.DB, brandID, entitlementID, learnerID int64, bookingID, holdID, consumptionID *int64, action entitlement.Action, delta int, balanceAfter *int, note string, operatedBy *int64) error {
 	row := EntitlementTransactionModel{
 		BrandID:               brandID,
 		LearnerEntitlementID:  entitlementID,
 		BrandLearnerProfileID: learnerID,
 		BookingID:             bookingID,
 		HoldID:                holdID,
+		ConsumptionID:         consumptionID,
 		Action:                string(action),
 		DeltaCredits:          delta,
 		BalanceAfter:          balanceAfter,

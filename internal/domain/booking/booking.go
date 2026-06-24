@@ -347,6 +347,10 @@ type Repository interface {
 	Create(ctx context.Context, in CreateInput) (*Booking, error)
 	// Cancel 单事务 TX-2：锁 session+booking→校 deadline/allow_cancel→cancelled+退名额+release/forfeit hold。
 	Cancel(ctx context.Context, brandID, actorID, id int64, reason string) (*Booking, error)
+	// Attend 单事务 TX-A（Batch 13e）：锁 booking+session→booked|pending_no_show→attended→attendance_records→
+	// hold consume（held→consumed + entitlement_consumptions + session_records + txn consume）。占位无 hold→不消费。
+	// data_scope 守卫由 service 层完成（GetByID + guardLocationInScope）。
+	Attend(ctx context.Context, brandID, actorID, id int64, note string) (*Booking, error)
 	List(ctx context.Context, filter ListFilter, offset, limit int) ([]*Booking, int64, error)
 	GetByID(ctx context.Context, brandID, id int64) (*Booking, error)
 	// UsableEntitlements 返回某学员对某场次的可用权益（§5.7 序，[0].AutoSelected=true）。

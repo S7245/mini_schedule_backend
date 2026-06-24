@@ -295,6 +295,125 @@ func TestBooking_Cancel_ForfeitWhenNoRelease(t *testing.T) {
 	}
 }
 
+// ---- TX-A 签到（标到课）----
+
+func TestAttend_ConsumesHold_CountBased(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	f := bookingSetup(t, db)
+	ent := grantEnt(t, db, f.brandID, f.learner, "10次卡", "class_pack", intp(10), "all", "all", nil, nil)
+	bk, _ := repo.Create(context.Background(), booking.CreateInput{
+		BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: f.learner, EntitlementMode: booking.ModeAuto,
+	})
+	att, err := repo.Attend(context.Background(), f.brandID, f.actor, bk.ID, "到课ok")
+	if err != nil {
+		t.Fatalf("attend: %v", err)
+	}
+	if att.Status != booking.StatusAttended {
+		t.Errorf("status = %s, want attended", att.Status)
+	}
+	if att.Hold == nil || att.Hold.Status != booking.HoldStatusConsumed {
+		t.Fatalf("hold = %+v, want consumed", att.Hold)
+	}
+	// 签到不退名额（只有取消退）。
+	if got := sessionBookedCount(t, db, f.session); got != 1 {
+		t.Errorf("booked_count = %d, want 1 (签到不退名额)", got)
+	}
+	// remaining 不变（下单时已扣），locked--/consumed++。
+	e := mustEntitlement(t, db, ent)
+	if *e.RemainingCredits != 9 || e.LockedCredits != 0 || e.ConsumedCredits != 1 {
+		t.Errorf("consume: remaining=%d locked=%d consumed=%d, want 9/0/1", *e.RemainingCredits, e.LockedCredits, e.ConsumedCredits)
+	}
+	var nAtt, nCons, nRec int64
+	db.Model(&AttendanceRecordModel{}).Where("booking_id = ?", bk.ID).Count(&nAtt)
+	db.Model(&EntitlementConsumptionModel{}).Where("booking_id = ?", bk.ID).Count(&nCons)
+	db.Model(&SessionRecordModel{}).Where("booking_id = ?", bk.ID).Count(&nRec)
+	if nAtt != 1 || nCons != 1 || nRec != 1 {
+		t.Errorf("rows attendance=%d consumption=%d session_record=%d, want 1/1/1", nAtt, nCons, nRec)
+	}
+	var cons EntitlementConsumptionModel
+	db.Where("booking_id = ?", bk.ID).First(&cons)
+	if cons.ConsumptionType != string(booking.ConsumptionAttendance) || cons.EntitlementHoldID == nil || cons.AttendanceID == nil {
+		t.Errorf("consumption shape: type=%s hold=%v attendance=%v", cons.ConsumptionType, cons.EntitlementHoldID, cons.AttendanceID)
+	}
+	var ctx EntitlementTransactionModel
+	db.Where("booking_id = ? AND action = 'consume'", bk.ID).First(&ctx)
+	if ctx.DeltaCredits != 0 || ctx.ConsumptionID == nil {
+		t.Errorf("consume txn: delta=%d consumption_id=%v, want 0/non-nil", ctx.DeltaCredits, ctx.ConsumptionID)
+	}
+	// 重复签到被 unique 兜底。
+	_, err = repo.Attend(context.Background(), f.brandID, f.actor, bk.ID, "again")
+	assertAppCode(t, err, apperr.ErrAttendanceAlreadyMarked)
+}
+
+func TestAttend_Unlimited_RemainingStaysNull(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	f := bookingSetup(t, db)
+	ent := grantEnt(t, db, f.brandID, f.learner, "月卡", "membership_card", nil, "all", "all", nil, nil)
+	bk, _ := repo.Create(context.Background(), booking.CreateInput{
+		BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: f.learner,
+		EntitlementMode: booking.ModeManual, LearnerEntitlementID: &ent,
+	})
+	if _, err := repo.Attend(context.Background(), f.brandID, f.actor, bk.ID, ""); err != nil {
+		t.Fatalf("attend: %v", err)
+	}
+	e := mustEntitlement(t, db, ent)
+	if e.RemainingCredits != nil {
+		t.Errorf("不限次 remaining 应保持 NULL, got %v", *e.RemainingCredits)
+	}
+	if e.LockedCredits != 0 || e.ConsumedCredits != 1 {
+		t.Errorf("locked=%d consumed=%d, want 0/1", e.LockedCredits, e.ConsumedCredits)
+	}
+	var tx EntitlementTransactionModel
+	db.Where("learner_entitlement_id = ? AND action = 'consume'", ent).First(&tx)
+	if tx.DeltaCredits != 0 || tx.BalanceAfter != nil {
+		t.Errorf("不限次 consume txn delta=%d balance=%v, want 0/NULL", tx.DeltaCredits, tx.BalanceAfter)
+	}
+}
+
+func TestAttend_Placeholder_NoConsumption(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	f := bookingSetup(t, db)
+	bk, err := repo.Create(context.Background(), booking.CreateInput{
+		BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: f.learner,
+		EntitlementMode: booking.ModeNone, NoEntitlementReason: "权益待补",
+	})
+	if err != nil {
+		t.Fatalf("create placeholder: %v", err)
+	}
+	att, err := repo.Attend(context.Background(), f.brandID, f.actor, bk.ID, "")
+	if err != nil {
+		t.Fatalf("attend placeholder: %v", err)
+	}
+	if att.Status != booking.StatusAttended || !att.RequiresEntitlementFix {
+		t.Errorf("placeholder attend: status=%s fix=%v, want attended/true", att.Status, att.RequiresEntitlementFix)
+	}
+	var nAtt, nCons, nRec int64
+	db.Model(&AttendanceRecordModel{}).Where("booking_id = ?", bk.ID).Count(&nAtt)
+	db.Model(&EntitlementConsumptionModel{}).Where("booking_id = ?", bk.ID).Count(&nCons)
+	db.Model(&SessionRecordModel{}).Where("booking_id = ?", bk.ID).Count(&nRec)
+	if nAtt != 1 || nCons != 0 || nRec != 1 {
+		t.Errorf("placeholder rows attendance=%d consumption=%d session_record=%d, want 1/0/1", nAtt, nCons, nRec)
+	}
+}
+
+func TestAttend_NotAttendableAfterCancel(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	f := bookingSetup(t, db)
+	grantEnt(t, db, f.brandID, f.learner, "卡", "class_pack", intp(10), "all", "all", nil, nil)
+	bk, _ := repo.Create(context.Background(), booking.CreateInput{
+		BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: f.learner, EntitlementMode: booking.ModeAuto,
+	})
+	if _, err := repo.Cancel(context.Background(), f.brandID, f.actor, bk.ID, "x"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	_, err := repo.Attend(context.Background(), f.brandID, f.actor, bk.ID, "")
+	assertAppCode(t, err, apperr.ErrBookingNotAttendable)
+}
+
 func TestBooking_AutoNoneAvailable(t *testing.T) {
 	db := newMigratedTestDB(t)
 	repo := NewBookingRepository(db)

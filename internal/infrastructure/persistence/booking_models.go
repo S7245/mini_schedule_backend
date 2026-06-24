@@ -82,3 +82,55 @@ type ClassSessionPolicyOverrideModel struct {
 }
 
 func (ClassSessionPolicyOverrideModel) TableName() string { return "class_session_policy_overrides" }
+
+// AttendanceRecordModel attendance_records 表（Batch 13e）。unique(booking_id) 防重签。
+type AttendanceRecordModel struct {
+	ID                    int64     `gorm:"primaryKey;autoIncrement"`
+	CreatedAt             time.Time `gorm:"column:created_at"`
+	BrandID               int64     `gorm:"column:brand_id"`
+	BookingID             int64     `gorm:"column:booking_id"`
+	ClassSessionID        int64     `gorm:"column:class_session_id"`
+	BrandLearnerProfileID int64     `gorm:"column:brand_learner_profile_id"`
+	MarkedBy              *int64    `gorm:"column:marked_by"`
+	AttendedAt            time.Time `gorm:"column:attended_at"`
+	Note                  *string   `gorm:"column:note"`
+}
+
+func (AttendanceRecordModel) TableName() string { return "attendance_records" }
+
+// EntitlementConsumptionModel entitlement_consumptions 表（Batch 13e）。
+// unique(entitlement_hold_id) WHERE NOT NULL 防重复消费同 hold。consumption_type ∈ {attendance,no_show,manual}。
+type EntitlementConsumptionModel struct {
+	ID                    int64     `gorm:"primaryKey;autoIncrement"`
+	CreatedAt             time.Time `gorm:"column:created_at"`
+	BrandID               int64     `gorm:"column:brand_id"`
+	EntitlementHoldID     *int64    `gorm:"column:entitlement_hold_id"`
+	LearnerEntitlementID  int64     `gorm:"column:learner_entitlement_id"`
+	BookingID             int64     `gorm:"column:booking_id"`
+	AttendanceID          *int64    `gorm:"column:attendance_id"`
+	BrandLearnerProfileID int64     `gorm:"column:brand_learner_profile_id"`
+	Credits               int       `gorm:"column:credits"`
+	ConsumptionType       string    `gorm:"column:consumption_type"`
+	ConsumedAt            time.Time `gorm:"column:consumed_at"`
+	OperatedBy            *int64    `gorm:"column:operated_by"`
+	Note                  *string   `gorm:"column:note"`
+}
+
+func (EntitlementConsumptionModel) TableName() string { return "entitlement_consumptions" }
+
+// SessionRecordModel session_records 表（Batch 13e，履约记录）。record_type ∈ {attendance,no_show,manual}。
+// metadata 列省略不映射 → INSERT 不带，DB 默认 '{}' 生效（v1 不承载富履约数据）。
+type SessionRecordModel struct {
+	ID                    int64     `gorm:"primaryKey;autoIncrement"`
+	CreatedAt             time.Time `gorm:"column:created_at"`
+	BrandID               int64     `gorm:"column:brand_id"`
+	ClassSessionID        int64     `gorm:"column:class_session_id"`
+	BookingID             int64     `gorm:"column:booking_id"`
+	AttendanceID          *int64    `gorm:"column:attendance_id"`
+	BrandLearnerProfileID int64     `gorm:"column:brand_learner_profile_id"`
+	InstructorProfileID   *int64    `gorm:"column:instructor_profile_id"`
+	RecordType            string    `gorm:"column:record_type"`
+	Note                  *string   `gorm:"column:note"`
+}
+
+func (SessionRecordModel) TableName() string { return "session_records" }
