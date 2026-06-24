@@ -30,6 +30,10 @@ func (h *BookingHandler) RegisterRoutes(g *gin.RouterGroup) {
 	g.GET("/bookings/:id", h.get)
 	g.POST("/bookings", h.create)
 	g.POST("/bookings/:id/cancel", h.cancel)
+	// Batch 13e 签到 / 履约 / 爽约（结束场次复用 /class-sessions 命名空间，逻辑在 booking 域）。
+	g.POST("/bookings/:id/attend", h.attend)
+	g.POST("/bookings/:id/no-show", h.noShow)
+	g.POST("/class-sessions/:id/end", h.endSession)
 
 	g.GET("/booking-policy", h.getPolicy)
 	g.PUT("/booking-policy", h.upsertPolicy)
@@ -137,6 +141,64 @@ func (h *BookingHandler) cancel(c *gin.Context) {
 		return
 	}
 	response.Success(c, bk)
+}
+
+// ---- Batch 13e 签到 / 履约 / 爽约 ----
+
+func (h *BookingHandler) attend(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
+	id, err := bookingIDParam(c)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	var body struct {
+		Note string `json:"note"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	bk, err := h.svc.Attend(c.Request.Context(), brandID, actorID, id, body.Note)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, bk)
+}
+
+func (h *BookingHandler) noShow(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
+	id, err := bookingIDParam(c)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	bk, err := h.svc.ConfirmNoShow(c.Request.Context(), brandID, actorID, id, body.Reason)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, bk)
+}
+
+func (h *BookingHandler) endSession(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	actorID := middleware.GetUserID(c)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Error(c, apperr.NewAppError(apperr.ErrSessionNotFound, "场次不存在", 404))
+		return
+	}
+	res, err := h.svc.EndSession(c.Request.Context(), brandID, actorID, id)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, res)
 }
 
 func (h *BookingHandler) usableEntitlements(c *gin.Context) {

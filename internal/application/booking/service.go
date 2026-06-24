@@ -129,6 +129,54 @@ func (s *Service) Cancel(ctx context.Context, brandID, actorID, id int64, reason
 	return s.repo.Cancel(ctx, brandID, actorID, id, reason)
 }
 
+// Attend 签到/标到课（attendance.mark + data_scope 守卫场次门店）。
+func (s *Service) Attend(ctx context.Context, brandID, actorID, id int64, note string) (*domainbooking.Booking, error) {
+	if err := s.require(ctx, brandID, actorID, "attendance.mark"); err != nil {
+		return nil, err
+	}
+	if len([]rune(note)) > 1000 {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "备注过长（≤1000）", 400)
+	}
+	bk, err := s.repo.GetByID(ctx, brandID, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.guardLocationInScope(ctx, brandID, actorID, bk.LocationID); err != nil {
+		return nil, err
+	}
+	return s.repo.Attend(ctx, brandID, actorID, id, note)
+}
+
+// EndSession 结束场次（attendance.mark + data_scope 在 repo 内按 ScopeLocationIDs 守卫场次门店）。
+func (s *Service) EndSession(ctx context.Context, brandID, actorID, sessionID int64) (*domainbooking.EndSessionResult, error) {
+	if err := s.require(ctx, brandID, actorID, "attendance.mark"); err != nil {
+		return nil, err
+	}
+	scopeIDs, err := s.scopeFilterIDs(ctx, brandID, actorID)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.EndSession(ctx, brandID, actorID, sessionID, scopeIDs)
+}
+
+// ConfirmNoShow 确认爽约（attendance.no_show_confirm + data_scope 守卫场次门店）。
+func (s *Service) ConfirmNoShow(ctx context.Context, brandID, actorID, id int64, reason string) (*domainbooking.Booking, error) {
+	if err := s.require(ctx, brandID, actorID, "attendance.no_show_confirm"); err != nil {
+		return nil, err
+	}
+	if len([]rune(reason)) > 1000 {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "处理原因过长（≤1000）", 400)
+	}
+	bk, err := s.repo.GetByID(ctx, brandID, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.guardLocationInScope(ctx, brandID, actorID, bk.LocationID); err != nil {
+		return nil, err
+	}
+	return s.repo.ConfirmNoShow(ctx, brandID, actorID, id, reason)
+}
+
 // ListInput 列表查询。
 type ListInput struct {
 	BrandID                int64
