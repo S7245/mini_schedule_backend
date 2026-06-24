@@ -351,6 +351,12 @@ type Repository interface {
 	// hold consume（held→consumed + entitlement_consumptions + session_records + txn consume）。占位无 hold→不消费。
 	// data_scope 守卫由 service 层完成（GetByID + guardLocationInScope）。
 	Attend(ctx context.Context, brandID, actorID, id int64, note string) (*Booking, error)
+	// EndSession 单事务 TX-B（Batch 13e）：锁 session→校 scheduled/in_progress→completed→未签到 booked 批量→pending_no_show。
+	// scopeLocationIDs 非 nil 时守卫场次门店（越权 SESSION_NOT_FOUND）。
+	EndSession(ctx context.Context, brandID, actorID, sessionID int64, scopeLocationIDs []int64) (*EndSessionResult, error)
+	// ConfirmNoShow 单事务 TX-C（Batch 13e）：锁 booking→校 pending_no_show→no_show→按 policy
+	// no_show_consumes_entitlement consume/release hold + session_records(no_show)。data_scope 守卫由 service 完成。
+	ConfirmNoShow(ctx context.Context, brandID, actorID, id int64, reason string) (*Booking, error)
 	List(ctx context.Context, filter ListFilter, offset, limit int) ([]*Booking, int64, error)
 	GetByID(ctx context.Context, brandID, id int64) (*Booking, error)
 	// UsableEntitlements 返回某学员对某场次的可用权益（§5.7 序，[0].AutoSelected=true）。

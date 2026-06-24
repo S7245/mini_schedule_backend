@@ -927,6 +927,132 @@ func (r *bookingRepository) Attend(ctx context.Context, brandID, actorID, id int
 	return r.GetByID(ctx, brandID, id)
 }
 
+// ---- TX-B 结束场次 ----
+
+// EndSession scheduled|in_progress → completed + 未签到的 booked 批量 → pending_no_show（hold/booked_count 不动）。
+// completed 场次不可再取消（class_session.Cancel 仅允 scheduled/in_progress），故 pending_no_show 永不被 TX-3 触及。
+func (r *bookingRepository) EndSession(ctx context.Context, brandID, actorID, sessionID int64, scopeLocationIDs []int64) (*booking.EndSessionResult, error) {
+	var pendingCount int64
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var sess ClassSessionModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND brand_id = ?", sessionID, brandID).First(&sess).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrSessionNotFound, "场次不存在", 404)
+			}
+			return apperr.ErrInternalF("查询场次失败", err)
+		}
+		// data_scope：越权场次按不存在处理（不泄漏存在性）。
+		if scopeLocationIDs != nil && !int64InSlice(sess.LocationID, scopeLocationIDs) {
+			return apperr.NewAppError(apperr.ErrSessionNotFound, "场次不存在", 404)
+		}
+		if sess.Status != "scheduled" && sess.Status != "in_progress" {
+			return apperr.NewAppError(apperr.ErrSessionNotEndable, "仅可结束未开始或进行中的场次", 409)
+		}
+		if err := tx.Model(&ClassSessionModel{}).Where("id = ?", sessionID).
+			Update("status", "completed").Error; err != nil {
+			return apperr.ErrInternalF("更新场次状态失败", err)
+		}
+		res := tx.Model(&BookingModel{}).
+			Where("class_session_id = ? AND status = ?", sessionID, string(booking.StatusBooked)).
+			Update("status", string(booking.StatusPendingNoShow))
+		if res.Error != nil {
+			return apperr.ErrInternalF("批量转待爽约失败", res.Error)
+		}
+		pendingCount = res.RowsAffected
+		bID := brandID
+		return audit.Write(tx, audit.Event{
+			BrandID: &bID,
+			Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: actorID},
+			Action:  "session_ended",
+			Target:  audit.Target{Type: "class_session", ID: sessionID},
+			After:   map[string]any{"pending_no_show_count": pendingCount},
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &booking.EndSessionResult{SessionID: sessionID, Status: "completed", PendingNoShowCount: int(pendingCount)}, nil
+}
+
+// ---- TX-C 确认爽约 ----
+
+// ConfirmNoShow pending_no_show → no_show + 按 policy no_show_consumes_entitlement consume/release hold
+// + session_records(no_show)。占位预约（无 hold）只置 no_show + 履约记录，不结算。
+func (r *bookingRepository) ConfirmNoShow(ctx context.Context, brandID, actorID, id int64, reason string) (*booking.Booking, error) {
+	now := time.Now().UTC()
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var pre BookingModel
+		if err := tx.Where("id = ? AND brand_id = ?", id, brandID).First(&pre).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrBookingNotFound, "预约不存在", 404)
+			}
+			return apperr.ErrInternalF("查询预约失败", err)
+		}
+		// 锁序：先场次后预约（与下单/取消/签到一致）。
+		var sess ClassSessionModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ?", pre.ClassSessionID).First(&sess).Error; err != nil {
+			return apperr.ErrInternalF("查询场次失败", err)
+		}
+		var bk BookingModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND brand_id = ?", id, brandID).First(&bk).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrBookingNotFound, "预约不存在", 404)
+			}
+			return apperr.ErrInternalF("查询预约失败", err)
+		}
+		if !booking.CanConfirmNoShow(booking.Status(bk.Status)) {
+			return apperr.NewAppError(apperr.ErrBookingNotConfirmable, "该预约当前不可确认爽约", 409)
+		}
+		eff, perr := r.resolveEffectivePolicy(tx, brandID, sess.LocationID, sess.ID)
+		if perr != nil {
+			return perr
+		}
+		after := bk
+		after.Status = string(booking.StatusNoShow)
+		if err := tx.Model(&BookingModel{}).Where("id = ?", bk.ID).Update("status", after.Status).Error; err != nil {
+			return apperr.ErrInternalF("更新预约状态失败", err)
+		}
+		// hold 收口：扣课（policy true）或退课（policy false）；占位无 hold→跳过。
+		if eff.NoShowConsumesEntitlement {
+			if err := settleHoldForOutcome(tx, brandID, bk.ID, bk.BrandLearnerProfileID, actorID, true,
+				booking.ConsumptionNoShow, nil, entitlement.ActionNoShowConsume, "爽约扣课", now); err != nil {
+				return err
+			}
+		} else {
+			if err := settleHoldForOutcome(tx, brandID, bk.ID, bk.BrandLearnerProfileID, actorID, false,
+				booking.ConsumptionNoShow, nil, entitlement.ActionRelease, "爽约释放", now); err != nil {
+				return err
+			}
+		}
+		// session_records(no_show, note=处理原因)。
+		var notePtr *string
+		if n := strings.TrimSpace(reason); n != "" {
+			notePtr = &n
+		}
+		var instrPtr *int64
+		if sess.InstructorProfileID > 0 {
+			instr := sess.InstructorProfileID
+			instrPtr = &instr
+		}
+		rec := SessionRecordModel{
+			BrandID: brandID, ClassSessionID: sess.ID, BookingID: bk.ID, AttendanceID: nil,
+			BrandLearnerProfileID: bk.BrandLearnerProfileID, InstructorProfileID: instrPtr,
+			RecordType: string(booking.RecordNoShow), Note: notePtr,
+		}
+		if err := tx.Create(&rec).Error; err != nil {
+			return apperr.ErrInternalF("写入履约记录失败", err)
+		}
+		return writeBookingLog(tx, brandID, actorID, "booking_no_show", bk.ID, &bk, &after)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.GetByID(ctx, brandID, id)
+}
+
 // ---- usable-entitlements ----
 
 func (r *bookingRepository) UsableEntitlements(ctx context.Context, brandID, sessionID, learnerID int64, scopeLocationIDs []int64) ([]*booking.UsableEntitlement, error) {

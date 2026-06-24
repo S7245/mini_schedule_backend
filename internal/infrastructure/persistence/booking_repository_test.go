@@ -414,6 +414,176 @@ func TestAttend_NotAttendableAfterCancel(t *testing.T) {
 	assertAppCode(t, err, apperr.ErrBookingNotAttendable)
 }
 
+// ---- TX-B 结束场次 ----
+
+func TestEndSession_SweepsBookedToPendingNoShow(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	f := bookingSetup(t, db)
+	l2 := seedLearnerProfile(t, db, f.brandID, "bk:learner2")
+	grantEnt(t, db, f.brandID, f.learner, "卡1", "class_pack", intp(10), "all", "all", nil, nil)
+	grantEnt(t, db, f.brandID, l2, "卡2", "class_pack", intp(10), "all", "all", nil, nil)
+	bk1, _ := repo.Create(context.Background(), booking.CreateInput{
+		BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: f.learner, EntitlementMode: booking.ModeAuto,
+	})
+	bk2, _ := repo.Create(context.Background(), booking.CreateInput{
+		BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: l2, EntitlementMode: booking.ModeAuto,
+	})
+	// 只签到 bk1，留 bk2 未签到。
+	if _, err := repo.Attend(context.Background(), f.brandID, f.actor, bk1.ID, ""); err != nil {
+		t.Fatalf("attend bk1: %v", err)
+	}
+	res, err := repo.EndSession(context.Background(), f.brandID, f.actor, f.session, nil)
+	if err != nil {
+		t.Fatalf("end session: %v", err)
+	}
+	if res.Status != "completed" || res.PendingNoShowCount != 1 {
+		t.Errorf("end result: status=%s pending=%d, want completed/1", res.Status, res.PendingNoShowCount)
+	}
+	var ss string
+	db.Raw(`SELECT status FROM class_sessions WHERE id = ?`, f.session).Scan(&ss)
+	if ss != "completed" {
+		t.Errorf("session status = %s, want completed", ss)
+	}
+	if s1, _ := bookingStatusOf(t, db, bk1.ID); s1 != string(booking.StatusAttended) {
+		t.Errorf("bk1 status = %s, want attended (结束场次不动已签到)", s1)
+	}
+	if s2, _ := bookingStatusOf(t, db, bk2.ID); s2 != string(booking.StatusPendingNoShow) {
+		t.Errorf("bk2 status = %s, want pending_no_show", s2)
+	}
+	// 重复结束 completed 场次。
+	_, err = repo.EndSession(context.Background(), f.brandID, f.actor, f.session, nil)
+	assertAppCode(t, err, apperr.ErrSessionNotEndable)
+}
+
+// ---- TX-C 确认爽约 ----
+
+func TestConfirmNoShow_ReleaseWhenPolicyFalse(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	f := bookingSetup(t, db)
+	ent := grantEnt(t, db, f.brandID, f.learner, "卡", "class_pack", intp(10), "all", "all", nil, nil)
+	bk, _ := repo.Create(context.Background(), booking.CreateInput{
+		BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: f.learner, EntitlementMode: booking.ModeAuto,
+	})
+	if _, err := repo.EndSession(context.Background(), f.brandID, f.actor, f.session, nil); err != nil {
+		t.Fatalf("end: %v", err)
+	}
+	nb, err := repo.ConfirmNoShow(context.Background(), f.brandID, f.actor, bk.ID, "没来")
+	if err != nil {
+		t.Fatalf("confirm no_show: %v", err)
+	}
+	if nb.Status != booking.StatusNoShow {
+		t.Errorf("status = %s, want no_show", nb.Status)
+	}
+	// 默认 policy no_show_consumes=false → 退课。
+	e := mustEntitlement(t, db, ent)
+	if *e.RemainingCredits != 10 || e.LockedCredits != 0 || e.ConsumedCredits != 0 {
+		t.Errorf("release: remaining=%d locked=%d consumed=%d, want 10/0/0", *e.RemainingCredits, e.LockedCredits, e.ConsumedCredits)
+	}
+	var h EntitlementHoldModel
+	db.Where("booking_id = ?", bk.ID).First(&h)
+	if h.Status != string(booking.HoldStatusReleased) {
+		t.Errorf("hold = %s, want released", h.Status)
+	}
+	var nCons, nRec int64
+	db.Model(&EntitlementConsumptionModel{}).Where("booking_id = ?", bk.ID).Count(&nCons)
+	db.Model(&SessionRecordModel{}).Where("booking_id = ? AND record_type = 'no_show'", bk.ID).Count(&nRec)
+	if nCons != 0 || nRec != 1 {
+		t.Errorf("rows consumption=%d no_show_record=%d, want 0/1", nCons, nRec)
+	}
+	var tx EntitlementTransactionModel
+	db.Where("booking_id = ? AND action = 'release'", bk.ID).First(&tx)
+	if tx.DeltaCredits != 1 {
+		t.Errorf("release txn delta = %d, want 1", tx.DeltaCredits)
+	}
+	// 已 no_show 不可再确认。
+	_, err = repo.ConfirmNoShow(context.Background(), f.brandID, f.actor, bk.ID, "again")
+	assertAppCode(t, err, apperr.ErrBookingNotConfirmable)
+}
+
+func TestConfirmNoShow_ConsumeWhenPolicyTrue(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	f := bookingSetup(t, db)
+	if _, err := repo.UpsertDefaultPolicy(context.Background(), f.brandID, f.actor, booking.Policy{
+		NoShowConsumesEntitlement: true, ReleaseOnCancel: true, AllowWaitlist: true,
+	}); err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	ent := grantEnt(t, db, f.brandID, f.learner, "卡", "class_pack", intp(10), "all", "all", nil, nil)
+	bk, _ := repo.Create(context.Background(), booking.CreateInput{
+		BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: f.learner, EntitlementMode: booking.ModeAuto,
+	})
+	if _, err := repo.EndSession(context.Background(), f.brandID, f.actor, f.session, nil); err != nil {
+		t.Fatalf("end: %v", err)
+	}
+	if _, err := repo.ConfirmNoShow(context.Background(), f.brandID, f.actor, bk.ID, "扣课"); err != nil {
+		t.Fatalf("confirm no_show: %v", err)
+	}
+	// policy true → 扣课。
+	e := mustEntitlement(t, db, ent)
+	if *e.RemainingCredits != 9 || e.LockedCredits != 0 || e.ConsumedCredits != 1 {
+		t.Errorf("consume: remaining=%d locked=%d consumed=%d, want 9/0/1", *e.RemainingCredits, e.LockedCredits, e.ConsumedCredits)
+	}
+	var h EntitlementHoldModel
+	db.Where("booking_id = ?", bk.ID).First(&h)
+	if h.Status != string(booking.HoldStatusConsumed) {
+		t.Errorf("hold = %s, want consumed", h.Status)
+	}
+	var cons EntitlementConsumptionModel
+	if err := db.Where("booking_id = ?", bk.ID).First(&cons).Error; err != nil {
+		t.Fatalf("no consumption row: %v", err)
+	}
+	if cons.ConsumptionType != string(booking.ConsumptionNoShow) {
+		t.Errorf("consumption type = %s, want no_show", cons.ConsumptionType)
+	}
+	var tx EntitlementTransactionModel
+	db.Where("booking_id = ? AND action = 'no_show_consume'", bk.ID).First(&tx)
+	if tx.DeltaCredits != 0 || tx.ConsumptionID == nil {
+		t.Errorf("no_show_consume txn delta=%d consumption_id=%v, want 0/non-nil", tx.DeltaCredits, tx.ConsumptionID)
+	}
+}
+
+func TestConfirmNoShow_NotConfirmableWhenBooked(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	f := bookingSetup(t, db)
+	grantEnt(t, db, f.brandID, f.learner, "卡", "class_pack", intp(10), "all", "all", nil, nil)
+	bk, _ := repo.Create(context.Background(), booking.CreateInput{
+		BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: f.learner, EntitlementMode: booking.ModeAuto,
+	})
+	// 未结束场次（仍 booked）直接确认爽约。
+	_, err := repo.ConfirmNoShow(context.Background(), f.brandID, f.actor, bk.ID, "x")
+	assertAppCode(t, err, apperr.ErrBookingNotConfirmable)
+}
+
+func TestConfirmNoShow_Placeholder_NoSettle(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	f := bookingSetup(t, db)
+	bk, _ := repo.Create(context.Background(), booking.CreateInput{
+		BrandID: f.brandID, ActorID: f.actor, ClassSessionID: f.session, BrandLearnerProfileID: f.learner,
+		EntitlementMode: booking.ModeNone, NoEntitlementReason: "待补",
+	})
+	if _, err := repo.EndSession(context.Background(), f.brandID, f.actor, f.session, nil); err != nil {
+		t.Fatalf("end: %v", err)
+	}
+	nb, err := repo.ConfirmNoShow(context.Background(), f.brandID, f.actor, bk.ID, "占位爽约")
+	if err != nil {
+		t.Fatalf("confirm placeholder no_show: %v", err)
+	}
+	if nb.Status != booking.StatusNoShow {
+		t.Errorf("status = %s, want no_show", nb.Status)
+	}
+	var nCons, nRec int64
+	db.Model(&EntitlementConsumptionModel{}).Where("booking_id = ?", bk.ID).Count(&nCons)
+	db.Model(&SessionRecordModel{}).Where("booking_id = ? AND record_type = 'no_show'", bk.ID).Count(&nRec)
+	if nCons != 0 || nRec != 1 {
+		t.Errorf("placeholder no_show rows consumption=%d record=%d, want 0/1", nCons, nRec)
+	}
+}
+
 func TestBooking_AutoNoneAvailable(t *testing.T) {
 	db := newMigratedTestDB(t)
 	repo := NewBookingRepository(db)
