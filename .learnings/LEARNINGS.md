@@ -224,3 +224,20 @@ completed 不可取消（Cancel 仅 scheduled/in_progress）+ 仅 EndSession 产
 
 ### baseQuery hold join 过滤 released → 退课响应 hold=null（与 13c 一致，非 bug）
 `LEFT JOIN entitlement_holds ... AND h.status <> 'released'`：consumed 现身（attend/扣课响应正确），released 被过滤（爽约退课 / 取消退课响应 hold=null）。既有约定；前端据 requires_entitlement_fix + 终态推断区分。要直出 released 须改 join(DISTINCT ON) 并回归 13c。
+
+## 2026-06-25 Batch 14a — C 端学员自助预约（桥接 + 自助下单/取消）
+
+### auth 桥接 app_user→brand_learner_profile（by-openid，区别于 13a by-phone）
+C 端微信登录天然 key 是 wechat_open_id（NOT NULL UNIQUE）；13a find-or-create 是 by-phone（合成 openid、要求 phone）。桥接**新增** findOrCreateIdentityByOpenID（phone 留 NULL，绑定留 FR）+ FindOrCreateProfileByOpenID(by brand+identity，幂等：每登可重入、命中即返不消耗配额；缺则 quota 门 + audit actor=learner)。复用 13a 的*结构*非函数。profile_id 入 JWT（TokenPayload + 三处 claim，无状态零 migration）。同人 by-phone 档与 by-openid 登录是两个 profile，v1 不合并（验收链路：先 C 端登录建 P → brand 再发权益）。
+
+### assisted_by/cancelled_by/operated_by 都是 brand_users FK → 学员自助须传 NULL
+三列均 REFERENCES brand_users(id)，自助塞 learner id 会 23503。把 placeBooking/applyCancel/settleHoldOnCancel 的 actor 参数化为 *int64：staff/waitlist 传 &actorID（行为不变），learner 传 nil。学员身份靠 brand_learner_profile_id + audit(actor_type=learner；operation_logs CHECK 000003 已含 'learner'，仅补 Go audit.ActorLearner) 承载。改共享函数后复跑 13c/13d/13e 全 DB 单测证零回归。
+
+### 学员服务路径 = 无 RBAC + ownership（复用 RBAC-free repo）
+brand booking.Service 把 RBAC 焊 service 层、repo 层 RBAC-free（收 actorID + ScopeLocationIDs）。新 application/learnerbooking.Service 无 PermissionChecker：List 强制按 token profileID 过滤，Cancel 在 repo tx 内校所有权（WHERE 带 brand_learner_profile_id，越权 BOOKING_NOT_FOUND 404 不泄漏），ScopeLocationIDs 恒 nil。课程表只读复用 classsession repo.List(status=scheduled, From=now)，绕开 brand Service 的 require(schedule.view)——无需新方法。
+
+### §22.1 跨场次时间重叠 + 并发串行化
+learner 路径加 hasOverlappingBooking（cs.starts<new.ends AND cs.ends>new.starts，status<>cancelled，排除本场次）→ BOOKING_TIME_CONFLICT。**仅锁目标 session 行挡不住「并发同时约两节互相重叠的不同课」**（重叠跨多 session，COUNT 在 READ COMMITTED 看不到对方未提交行）→ CreateByLearner 先锁学员 brand_learner_profiles 行 FOR UPDATE 串行化（锁序 profile→session→entitlement，仅本路径锁 profile 无跨路径死锁）。只加 learner 路径，staff 代预约可故意双约不受影响。
+
+### api-app 启动需 CONFIG_PATH=configs/config-app.yaml
+main.go 默认读 configs/config.yaml（端口 8081，撞 api-brand）；必须 CONFIG_PATH=configs/config-app.yaml 才跑 :8082。
