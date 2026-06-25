@@ -59,6 +59,9 @@ type JoinInput struct {
 	ClassSessionID        int64
 	BrandLearnerProfileID int64
 	ScopeLocationIDs      []int64
+	// SelfService C 端学员自助加入（Batch 14b）：operated_by 落 NULL（brand_users FK，学员非 brand_user）、
+	// audit actor=learner（actor_id=BrandLearnerProfileID）。默认 false=staff 代加入（operated_by=ActorID）。
+	SelfService bool
 }
 
 // PromoteInput 转正入参（权益模式复用 13c：auto/manual/none 占位）。data_scope 由 service GetByID 守卫。

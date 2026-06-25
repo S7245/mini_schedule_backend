@@ -206,14 +206,23 @@ func (r *waitlistRepository) Join(ctx context.Context, in waitlist.JoinInput) (*
 		if maxPos != nil {
 			pos = *maxPos + 1
 		}
-		actor := in.ActorID
+		// 操作者：staff 代加入 operated_by=ActorID + audit brand_user；C 端学员自助 operated_by=NULL
+		// （brand_users FK）+ audit actor=learner（actor_id=profileID）。
+		var opBy *int64
+		logActor := audit.Actor{Type: audit.ActorBrandUser, ID: in.ActorID}
+		if in.SelfService {
+			logActor = audit.Actor{Type: audit.ActorLearner, ID: in.BrandLearnerProfileID}
+		} else {
+			a := in.ActorID
+			opBy = &a
+		}
 		entry := WaitlistEntryModel{
 			BrandID:               in.BrandID,
 			ClassSessionID:        sess.ID,
 			BrandLearnerProfileID: in.BrandLearnerProfileID,
 			Position:              pos,
 			Status:                string(waitlist.StatusWaiting),
-			OperatedBy:            &actor,
+			OperatedBy:            opBy,
 		}
 		if err := tx.Create(&entry).Error; err != nil {
 			if we := waitlistConflictError(err); we != nil {
@@ -222,7 +231,7 @@ func (r *waitlistRepository) Join(ctx context.Context, in waitlist.JoinInput) (*
 			return apperr.ErrInternalF("加入候补失败", err)
 		}
 		createdID = entry.ID
-		return writeWaitlistLog(tx, in.BrandID, in.ActorID, "waitlist_joined", entry.ID, nil, &entry)
+		return writeWaitlistLogAs(tx, logActor, in.BrandID, "waitlist_joined", entry.ID, nil, &entry)
 	})
 	if err != nil {
 		return nil, err
@@ -354,10 +363,15 @@ func (r *waitlistRepository) transition(ctx context.Context, brandID, actorID, i
 }
 
 func writeWaitlistLog(tx *gorm.DB, brandID, actorID int64, action string, id int64, before, after *WaitlistEntryModel) error {
+	return writeWaitlistLogAs(tx, audit.Actor{Type: audit.ActorBrandUser, ID: actorID}, brandID, action, id, before, after)
+}
+
+// writeWaitlistLogAs 同 writeWaitlistLog 但 actor 可指定（C 端学员自助传 {ActorLearner, profileID}，Batch 14b）。
+func writeWaitlistLogAs(tx *gorm.DB, actor audit.Actor, brandID int64, action string, id int64, before, after *WaitlistEntryModel) error {
 	bID := brandID
 	return audit.Write(tx, audit.Event{
 		BrandID: &bID,
-		Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: actorID},
+		Actor:   actor,
 		Action:  action,
 		Target:  audit.Target{Type: "waitlist_entry", ID: id},
 		Before:  before,
