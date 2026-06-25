@@ -141,6 +141,95 @@ func (r *learnerRepository) findOrCreateIdentity(tx *gorm.DB, phone, nickname st
 	return created.ID, nil
 }
 
+// findOrCreateIdentityByOpenID 按微信 openid 找身份，没有则新建（phone 留 NULL）。并发撞唯一约束回查。
+// 区别于 findOrCreateIdentity（by phone + 合成 openid）——C 端微信登录的天然 key 是 wechat_open_id。
+func (r *learnerRepository) findOrCreateIdentityByOpenID(tx *gorm.DB, openID, nickname string) (int64, error) {
+	var identity LearnerIdentityModel
+	err := tx.Where("wechat_open_id = ?", openID).First(&identity).Error
+	if err == nil {
+		return identity.ID, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, apperr.ErrInternalF("查询学员身份失败", err)
+	}
+	created := LearnerIdentityModel{
+		WechatOpenID: openID, // 真实/dev openid 作 key；phone 留 NULL（手机号绑定留 FR）。
+		Nickname:     strings.TrimSpace(nickname),
+		Status:       "active",
+	}
+	if err := tx.Create(&created).Error; err != nil {
+		if isUniqueViolation(err) {
+			var existing LearnerIdentityModel
+			if e2 := tx.Where("wechat_open_id = ?", openID).First(&existing).Error; e2 == nil {
+				return existing.ID, nil
+			}
+		}
+		return 0, apperr.ErrInternalF("创建学员身份失败", err)
+	}
+	return created.ID, nil
+}
+
+// FindOrCreateProfileByOpenID 见接口注释（Batch 14a 桥接）。单事务：identity(by openid) →
+// profile(by brand+identity，幂等) → 缺则 quota 门 + INSERT + audit(actor=learner)。
+func (r *learnerRepository) FindOrCreateProfileByOpenID(ctx context.Context, brandID int64, openID, nickname string) (*learner.Profile, error) {
+	openID = strings.TrimSpace(openID)
+	if openID == "" {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "缺少 openid", 400)
+	}
+	var profileID int64
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		identityID, ierr := r.findOrCreateIdentityByOpenID(tx, openID, nickname)
+		if ierr != nil {
+			return ierr
+		}
+		// 幂等：命中 (brand, identity) 未软删档案即返回（GORM 自动加 deleted_at IS NULL）。
+		var prof BrandLearnerProfileModel
+		ferr := tx.Where("brand_id = ? AND learner_identity_id = ?", brandID, identityID).First(&prof).Error
+		if ferr == nil {
+			profileID = prof.ID
+			return nil
+		}
+		if !errors.Is(ferr, gorm.ErrRecordNotFound) {
+			return apperr.ErrInternalF("查询学员档案失败", ferr)
+		}
+		// 缺则建：quota 门（max_learners 硬限）→ INSERT → audit。
+		if _, _, qerr := r.guard.CheckAndCount(ctx, tx, brandID, commercial.ResourceLearner); qerr != nil {
+			return qerr
+		}
+		created := BrandLearnerProfileModel{
+			BrandID:           brandID,
+			LearnerIdentityID: identityID,
+			Nickname:          strings.TrimSpace(nickname),
+			Status:            string(learner.StatusActive),
+		}
+		if cerr := tx.Create(&created).Error; cerr != nil {
+			if be := profileConflictError(cerr); be != nil {
+				// 并发：另一会话已建同 (brand, identity)，回查复用。
+				var existing BrandLearnerProfileModel
+				if e2 := tx.Where("brand_id = ? AND learner_identity_id = ?", brandID, identityID).First(&existing).Error; e2 == nil {
+					profileID = existing.ID
+					return nil
+				}
+				return be
+			}
+			return apperr.ErrInternalF("创建学员档案失败", cerr)
+		}
+		profileID = created.ID
+		bID := brandID
+		return audit.Write(tx, audit.Event{
+			BrandID: &bID,
+			Actor:   audit.Actor{Type: audit.ActorLearner, ID: created.ID},
+			Action:  "learner_self_registered",
+			Target:  audit.Target{Type: "brand_learner_profile", ID: created.ID},
+			After:   &created,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.GetByID(ctx, brandID, profileID)
+}
+
 // replaceTags 校验 tag_ids ⊆ 本 brand active 标签后硬删重插（create/update 共用）。
 func (r *learnerRepository) replaceTags(tx *gorm.DB, brandID, profileID int64, tagIDs []int64) error {
 	if err := tx.Where("brand_learner_profile_id = ?", profileID).

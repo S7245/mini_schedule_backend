@@ -141,6 +141,10 @@ type Repository interface {
 	// identity by phone → INSERT profile（重复手机号→LEARNER_ALREADY_EXISTS；重复学号→
 	// LEARNER_NO_DUPLICATED）→ tag 关联（tag_ids 非本 brand→LEARNER_TAG_NOT_FOUND）→ audit。
 	Create(ctx context.Context, in CreateInput) (*Profile, error)
+	// FindOrCreateProfileByOpenID C 端微信登录桥接（Batch 14a）：find-or-create identity by
+	// wechat_open_id（phone 留 NULL，手机号绑定留 FR）+ profile by (brand, identity)。幂等——每次
+	// 登录可重入，命中即返回。缺 profile 才建（quota 门 + audit actor=learner）。
+	FindOrCreateProfileByOpenID(ctx context.Context, brandID int64, openID, nickname string) (*Profile, error)
 	GetByID(ctx context.Context, brandID, id int64) (*Profile, error)
 	List(ctx context.Context, filter ListFilter, offset, limit int) ([]*Profile, int64, error)
 	Update(ctx context.Context, brandID, actorID, id int64, in UpdateInput) (*Profile, error)
