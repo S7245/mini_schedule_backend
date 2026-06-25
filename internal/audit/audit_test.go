@@ -29,6 +29,7 @@ func TestIsValidActorType(t *testing.T) {
 		ActorBrandUser:     true,
 		ActorPlatformAdmin: true,
 		ActorSystem:        true,
+		ActorLearner:       true,
 		ActorType(""):      false,
 		ActorType("x"):     false,
 	}

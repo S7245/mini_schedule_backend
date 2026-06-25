@@ -27,12 +27,14 @@ const (
 	ActorBrandUser     ActorType = "brand_user"
 	ActorPlatformAdmin ActorType = "platform_admin"
 	ActorSystem        ActorType = "system"
+	// ActorLearner C 端学员自助操作（Batch 14a）。DB CHECK operation_logs_actor_type_valid 已含 'learner'。
+	ActorLearner ActorType = "learner"
 )
 
 // IsValidActorType 校验枚举值。
 func IsValidActorType(t ActorType) bool {
 	switch t {
-	case ActorBrandUser, ActorPlatformAdmin, ActorSystem:
+	case ActorBrandUser, ActorPlatformAdmin, ActorSystem, ActorLearner:
 		return true
 	}
 	return false
