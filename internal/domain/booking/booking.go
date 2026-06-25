@@ -330,6 +330,14 @@ type CreateInput struct {
 	ScopeLocationIDs      []int64
 }
 
+// LearnerCreateInput C 端学员自助下单入参（Batch 14a）。无 ActorID（assisted_by 落 NULL）、无
+// ScopeLocationIDs（学员无 data_scope）；source 恒 learner_self_service、mode 恒 auto（§5.7 学员不自选权益）。
+type LearnerCreateInput struct {
+	BrandID               int64
+	ClassSessionID        int64
+	BrandLearnerProfileID int64
+}
+
 // ListFilter 预约列表查询。零值不过滤；ScopeLocationIDs 非 nil 时按 data_scope 收紧。
 type ListFilter struct {
 	BrandID                int64
@@ -345,6 +353,10 @@ type ListFilter struct {
 type Repository interface {
 	// Create 单事务 TX-1：锁 session→校窗口/容量→（auto/manual 锁权益+hold+流水 / none 占位）。
 	Create(ctx context.Context, in CreateInput) (*Booking, error)
+	// CreateByLearner 单事务 TX-L1（Batch 14a 学员自助）：锁 session(scheduled/窗口)→跨场次时间重叠校验
+	// （§22.1，重叠→BOOKING_TIME_CONFLICT）→placeBooking(auto/source=learner_self_service/assisted=nil)→audit(learner)。
+	// 无 data_scope（ScopeLocationIDs=nil）；前端只读课程表已限 scheduled。
+	CreateByLearner(ctx context.Context, in LearnerCreateInput) (*Booking, error)
 	// Cancel 单事务 TX-2：锁 session+booking→校 deadline/allow_cancel→cancelled+退名额+release/forfeit hold。
 	Cancel(ctx context.Context, brandID, actorID, id int64, reason string) (*Booking, error)
 	// Attend 单事务 TX-A（Batch 13e）：锁 booking+session→booked|pending_no_show→attended→attendance_records→

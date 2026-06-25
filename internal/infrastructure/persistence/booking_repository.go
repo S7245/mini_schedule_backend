@@ -631,6 +631,74 @@ func (r *bookingRepository) Create(ctx context.Context, in booking.CreateInput) 
 	return r.GetByID(ctx, in.BrandID, createdID)
 }
 
+// ---- TX-L1 学员自助下单（Batch 14a）----
+
+// hasOverlappingBooking 报告该学员是否已有未取消预约、其场次时段与 [startsAt,endsAt) 重叠（排除本场次，§22.1）。
+// 重叠定义：existing.starts < new.ends AND existing.ends > new.starts。
+func (r *bookingRepository) hasOverlappingBooking(tx *gorm.DB, brandID, learnerID, sessionID int64, startsAt, endsAt time.Time) (bool, error) {
+	var n int64
+	err := tx.Table("bookings b").
+		Joins("JOIN class_sessions cs ON cs.id = b.class_session_id").
+		Where("b.brand_id = ? AND b.brand_learner_profile_id = ? AND b.status <> 'cancelled'", brandID, learnerID).
+		Where("cs.id <> ?", sessionID).
+		Where("cs.starts_at < ? AND cs.ends_at > ?", endsAt, startsAt).
+		Count(&n).Error
+	if err != nil {
+		return false, apperr.ErrInternalF("校验时间冲突失败", err)
+	}
+	return n > 0, nil
+}
+
+// CreateByLearner C 端学员自助下单（source=learner_self_service，assisted_by NULL，mode=auto，无 data_scope）。
+// 复用 placeBooking 核心；前置加 §22.1 跨场次时间重叠校验；audit actor=learner。
+func (r *bookingRepository) CreateByLearner(ctx context.Context, in booking.LearnerCreateInput) (*booking.Booking, error) {
+	var createdID int64
+	now := time.Now().UTC()
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 1. 锁场次行 + 状态/窗口校验。
+		var sess ClassSessionModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND brand_id = ?", in.ClassSessionID, in.BrandID).First(&sess).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrSessionNotFound, "场次不存在", 404)
+			}
+			return apperr.ErrInternalF("查询场次失败", err)
+		}
+		if sess.Status != "scheduled" {
+			return apperr.NewAppError(apperr.ErrSessionNotBookable, "场次当前不可预约", 409)
+		}
+		eff, err := r.resolveEffectivePolicy(tx, in.BrandID, sess.LocationID, sess.ID)
+		if err != nil {
+			return err
+		}
+		if !booking.WithinBookingWindow(now, sess.StartsAt, eff) {
+			return apperr.NewAppError(apperr.ErrBookingWindowClosed, "当前不在可预约时间窗口内", 409)
+		}
+		// 2. 跨场次时间重叠校验（§22.1，仅学员路径）。
+		conflict, cerr := r.hasOverlappingBooking(tx, in.BrandID, in.BrandLearnerProfileID, sess.ID, sess.StartsAt, sess.EndsAt)
+		if cerr != nil {
+			return cerr
+		}
+		if conflict {
+			return apperr.NewAppError(apperr.ErrBookingTimeConflict, "同一时间已有预约，时间冲突", 409)
+		}
+		// 3. 下单核心：assisted_by=nil（自助）、auto、source=learner_self_service。
+		bk, err := r.placeBooking(tx, &sess, eff, in.BrandID, nil, in.BrandLearnerProfileID,
+			booking.ModeAuto, nil, "", string(booking.SourceLearnerSelfService), now)
+		if err != nil {
+			return err
+		}
+		createdID = bk.ID
+		// 4. audit（actor=learner）。
+		return writeBookingLogAs(tx, audit.Actor{Type: audit.ActorLearner, ID: in.BrandLearnerProfileID},
+			in.BrandID, "booking_created", bk.ID, nil, bk)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.GetByID(ctx, in.BrandID, createdID)
+}
+
 // ---- TX-2 代取消 ----
 
 func (r *bookingRepository) Cancel(ctx context.Context, brandID, actorID, id int64, reason string) (*booking.Booking, error) {
@@ -1209,10 +1277,15 @@ func insertBookingTransaction(tx *gorm.DB, brandID, entitlementID, learnerID int
 }
 
 func writeBookingLog(tx *gorm.DB, brandID, actorID int64, action string, id int64, before, after *BookingModel) error {
+	return writeBookingLogAs(tx, audit.Actor{Type: audit.ActorBrandUser, ID: actorID}, brandID, action, id, before, after)
+}
+
+// writeBookingLogAs 同 writeBookingLog 但 actor 可指定（C 端学员自助传 {ActorLearner, profileID}，Batch 14a）。
+func writeBookingLogAs(tx *gorm.DB, actor audit.Actor, brandID int64, action string, id int64, before, after *BookingModel) error {
 	bID := brandID
 	return audit.Write(tx, audit.Event{
 		BrandID: &bID,
-		Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: actorID},
+		Actor:   actor,
 		Action:  action,
 		Target:  audit.Target{Type: "booking", ID: id},
 		Before:  before,

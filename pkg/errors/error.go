@@ -178,6 +178,8 @@ const (
 	ErrEntitlementScopeMismatch ErrorCode = "ENTITLEMENT_SCOPE_MISMATCH"
 	// ErrBookingFrequencyExceeded (409)：daily/weekly/monthly/concurrent 频次超限（Details 带 which/limit/current）。
 	ErrBookingFrequencyExceeded ErrorCode = "BOOKING_FREQUENCY_EXCEEDED"
+	// ErrBookingTimeConflict (409)：学员同一时段已有未取消预约（跨场次 [starts,ends) 重叠，§22.1，Batch 14a 学员自助路径）。
+	ErrBookingTimeConflict ErrorCode = "BOOKING_TIME_CONFLICT"
 	// ErrAssistedReasonRequired (422)：无权益占位（none 模式）缺 no_entitlement_reason。
 	ErrAssistedReasonRequired ErrorCode = "ASSISTED_REASON_REQUIRED"
 	// ErrBookingNotFound (404)：预约不存在或越权（out-of-scope 不泄漏存在性）。
