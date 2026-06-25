@@ -36,6 +36,11 @@ jwt:
   expire: 24h
   refresh_expire: 168h
 
+# C 端浏览器/小程序直连后端需 CORS（生产用 MINI_SCHEDULE_CORS_ALLOWED_ORIGINS 注入 Vercel 域名）。
+cors:
+  allowed_origins:
+    - "http://localhost:3003"
+
 log:
   level: "debug"
   format: "text"

@@ -81,6 +81,7 @@ func newAppRouter(
 
 	r := gin.New()
 	r.Use(middleware.Locale())
+	r.Use(middleware.CORS(cfg.CORS))
 	r.Use(gin.Recovery())
 
 	api := r.Group("/api/v1/app")
