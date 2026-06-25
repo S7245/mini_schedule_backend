@@ -359,6 +359,10 @@ type Repository interface {
 	CreateByLearner(ctx context.Context, in LearnerCreateInput) (*Booking, error)
 	// Cancel 单事务 TX-2：锁 session+booking→校 deadline/allow_cancel→cancelled+退名额+release/forfeit hold。
 	Cancel(ctx context.Context, brandID, actorID, id int64, reason string) (*Booking, error)
+	// CancelByLearner 单事务 TX-L2（Batch 14a 学员自助）：tx 内校所有权（booking.profile==profileID，否则
+	// BOOKING_NOT_FOUND 404 不泄漏）→锁 session+booking→校 deadline/allow_cancel→cancelled(cancel_source=learner,
+	// cancelled_by NULL)+退名额+release/forfeit hold。
+	CancelByLearner(ctx context.Context, brandID, profileID, id int64, reason string) (*Booking, error)
 	// Attend 单事务 TX-A（Batch 13e）：锁 booking+session→booked|pending_no_show→attended→attendance_records→
 	// hold consume（held→consumed + entitlement_consumptions + session_records + txn consume）。占位无 hold→不消费。
 	// data_scope 守卫由 service 层完成（GetByID + guardLocationInScope）。

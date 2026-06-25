@@ -278,7 +278,7 @@ func (r *classSessionRepository) Cancel(ctx context.Context, brandID, actorID, i
 			}).Error; err != nil {
 				return apperr.ErrInternalF("级联取消预约失败", err)
 			}
-			if err := settleHoldOnCancel(tx, brandID, b.ID, b.BrandLearnerProfileID, actorID, true, now); err != nil {
+			if err := settleHoldOnCancel(tx, brandID, b.ID, b.BrandLearnerProfileID, &actorID, true, now); err != nil {
 				return err
 			}
 			cancelledIDs = append(cancelledIDs, b.ID)

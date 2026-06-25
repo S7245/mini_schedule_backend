@@ -97,3 +97,58 @@ func TestLearnerBooking_TimeConflict(t *testing.T) {
 		t.Fatalf("book s3 (no overlap) should succeed: %v", err)
 	}
 }
+
+// TestLearnerBooking_CancelOwnership 本人取消成功(cancel_source=learner, cancelled_by NULL, hold released)；
+// 取消他人预约 → BOOKING_NOT_FOUND（不泄漏存在性）。
+func TestLearnerBooking_CancelOwnership(t *testing.T) {
+	db := newMigratedTestDB(t)
+	repo := NewBookingRepository(db)
+	f := bookingSetup(t, db)
+	ent := grantEnt(t, db, f.brandID, f.learner, "10次卡", "class_pack", intp(10), "all", "all", nil, nil)
+
+	bk, err := repo.CreateByLearner(context.Background(), booking.LearnerCreateInput{
+		BrandID: f.brandID, ClassSessionID: f.session, BrandLearnerProfileID: f.learner,
+	})
+	if err != nil {
+		t.Fatalf("book: %v", err)
+	}
+
+	// 他人取消 → BOOKING_NOT_FOUND，且未被取消。
+	bob := seedLearnerProfile(t, db, f.brandID, "bk:bob")
+	_, err = repo.CancelByLearner(context.Background(), f.brandID, bob, bk.ID, "试图越权")
+	assertAppCode(t, err, apperr.ErrBookingNotFound)
+	var st string
+	db.Raw(`SELECT status FROM bookings WHERE id = ?`, bk.ID).Row().Scan(&st)
+	if st != "booked" {
+		t.Fatalf("booking should still be booked after foreign cancel, got %s", st)
+	}
+
+	// 本人取消 → 成功；cancel_source=learner，cancelled_by NULL。
+	out, err := repo.CancelByLearner(context.Background(), f.brandID, f.learner, bk.ID, "我不去了")
+	if err != nil {
+		t.Fatalf("owner cancel: %v", err)
+	}
+	if out.Status != booking.StatusCancelled {
+		t.Errorf("status = %s, want cancelled", out.Status)
+	}
+	var cancelSrc string
+	var cancelledBy *int64
+	db.Raw(`SELECT cancel_source, cancelled_by FROM bookings WHERE id = ?`, bk.ID).Row().Scan(&cancelSrc, &cancelledBy)
+	if cancelSrc != "learner" || cancelledBy != nil {
+		t.Errorf("cancel_source=%q cancelled_by=%v, want learner/NULL", cancelSrc, cancelledBy)
+	}
+	// hold released → remaining 回退 + locked 归零 + booked_count--。
+	e := mustEntitlement(t, db, ent)
+	if *e.RemainingCredits != 10 || e.LockedCredits != 0 {
+		t.Errorf("after cancel remaining=%d locked=%d, want 10/0", *e.RemainingCredits, e.LockedCredits)
+	}
+	if got := sessionBookedCount(t, db, f.session); got != 0 {
+		t.Errorf("booked_count = %d, want 0", got)
+	}
+	// audit actor=learner
+	var actorType string
+	db.Raw(`SELECT actor_type FROM operation_logs WHERE action = 'booking_cancelled' ORDER BY id DESC LIMIT 1`).Row().Scan(&actorType)
+	if actorType != "learner" {
+		t.Errorf("cancel audit actor=%q, want learner", actorType)
+	}
+}

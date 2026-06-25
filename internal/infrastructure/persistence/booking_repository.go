@@ -739,7 +739,7 @@ func (r *bookingRepository) Cancel(ctx context.Context, brandID, actorID, id int
 		if booking.CancelDeadlinePassed(now, sess.StartsAt, eff) {
 			return apperr.NewAppError(apperr.ErrBookingCancelDeadlinePassed, "已超过取消截止时间", 409)
 		}
-		if err := r.applyCancel(tx, &bk, &sess, actorID, booking.CancelSourceStaff, reason, eff.ReleaseOnCancel, now); err != nil {
+		if err := r.applyCancel(tx, &bk, &sess, &actorID, booking.CancelSourceStaff, reason, eff.ReleaseOnCancel, now); err != nil {
 			return err
 		}
 		after := bk
@@ -752,15 +752,73 @@ func (r *bookingRepository) Cancel(ctx context.Context, brandID, actorID, id int
 	return r.GetByID(ctx, brandID, id)
 }
 
+// CancelByLearner C 端学员自助取消（Batch 14a）：tx 内校所有权 + cancel_source=learner + cancelled_by NULL。
+// 镜像 Cancel，但 booking 锁定条件带 brand_learner_profile_id（越权按不存在），actorBy=nil，audit actor=learner。
+func (r *bookingRepository) CancelByLearner(ctx context.Context, brandID, profileID, id int64, reason string) (*booking.Booking, error) {
+	now := time.Now().UTC()
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 预读 + 所有权校验（越权/不存在均按不存在，不泄漏）。
+		var pre BookingModel
+		if err := tx.Where("id = ? AND brand_id = ?", id, brandID).First(&pre).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrBookingNotFound, "预约不存在", 404)
+			}
+			return apperr.ErrInternalF("查询预约失败", err)
+		}
+		if pre.BrandLearnerProfileID != profileID {
+			return apperr.NewAppError(apperr.ErrBookingNotFound, "预约不存在", 404)
+		}
+		// 锁序：先场次后预约（与下单/代取消一致）。
+		var sess ClassSessionModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ?", pre.ClassSessionID).First(&sess).Error; err != nil {
+			return apperr.ErrInternalF("查询场次失败", err)
+		}
+		// booking 锁定带 profile 条件，tx 内再校所有权（防 TOCTOU）。
+		var bk BookingModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND brand_id = ? AND brand_learner_profile_id = ?", id, brandID, profileID).First(&bk).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrBookingNotFound, "预约不存在", 404)
+			}
+			return apperr.ErrInternalF("查询预约失败", err)
+		}
+		if bk.Status != string(booking.StatusBooked) {
+			return apperr.NewAppError(apperr.ErrBookingNotCancellable, "该预约当前不可取消", 409)
+		}
+		eff, perr := r.resolveEffectivePolicy(tx, brandID, sess.LocationID, sess.ID)
+		if perr != nil {
+			return perr
+		}
+		if !eff.AllowCancel {
+			return apperr.NewAppError(apperr.ErrBookingCancelNotAllowed, "该场次不允许取消", 409)
+		}
+		if booking.CancelDeadlinePassed(now, sess.StartsAt, eff) {
+			return apperr.NewAppError(apperr.ErrBookingCancelDeadlinePassed, "已超过取消截止时间", 409)
+		}
+		// 学员自助：actorBy=nil（cancelled_by + txn operated_by NULL），cancel_source=learner。
+		if err := r.applyCancel(tx, &bk, &sess, nil, booking.CancelSourceLearner, reason, eff.ReleaseOnCancel, now); err != nil {
+			return err
+		}
+		after := bk
+		after.Status = string(booking.StatusCancelled)
+		return writeBookingLogAs(tx, audit.Actor{Type: audit.ActorLearner, ID: profileID}, brandID, "booking_cancelled", bk.ID, &bk, &after)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.GetByID(ctx, brandID, id)
+}
+
 // applyCancel 把单条 booked 预约置 cancelled + 退名额 + 处理 hold（release / forfeit）。
 // 调用方须已锁 session 行与 booking 行。release=false 时走 forfeit（hold→consumed，权益不回退）。
-func (r *bookingRepository) applyCancel(tx *gorm.DB, bk *BookingModel, sess *ClassSessionModel, actorID int64, cancelSource, reason string, release bool, now time.Time) error {
+// actorBy 为操作员工 id（FK→brand_users）；C 端学员自助取消传 nil（cancelled_by + txn operated_by NULL）。
+func (r *bookingRepository) applyCancel(tx *gorm.DB, bk *BookingModel, sess *ClassSessionModel, actorBy *int64, cancelSource, reason string, release bool, now time.Time) error {
 	cs := cancelSource
-	actor := actorID
 	upd := map[string]interface{}{
 		"status":        string(booking.StatusCancelled),
 		"cancelled_at":  now,
-		"cancelled_by":  actor,
+		"cancelled_by":  actorBy,
 		"cancel_source": cs,
 		"cancel_reason": strings.TrimSpace(reason),
 	}
@@ -774,13 +832,13 @@ func (r *bookingRepository) applyCancel(tx *gorm.DB, bk *BookingModel, sess *Cla
 		}
 		sess.BookedCount--
 	}
-	return settleHoldOnCancel(tx, bk.BrandID, bk.ID, bk.BrandLearnerProfileID, actorID, release, now)
+	return settleHoldOnCancel(tx, bk.BrandID, bk.ID, bk.BrandLearnerProfileID, actorBy, release, now)
 }
 
 // settleHoldOnCancel 处理取消时的 hold：release=true 释放权益（locked--/remaining++/re-settle），
 // release=false 没收（hold→consumed，locked--/consumed++，remaining 不回退）。无 hold（占位预约）直接返回。
 // 自由函数（同包）：TX-2 代取消与 TX-3 场次取消级联共用。
-func settleHoldOnCancel(tx *gorm.DB, brandID, bookingID, learnerID, actorID int64, release bool, now time.Time) error {
+func settleHoldOnCancel(tx *gorm.DB, brandID, bookingID, learnerID int64, actorBy *int64, release bool, now time.Time) error {
 	var hold EntitlementHoldModel
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("booking_id = ? AND status = ?", bookingID, string(booking.HoldStatusHeld)).First(&hold).Error
@@ -800,7 +858,6 @@ func settleHoldOnCancel(tx *gorm.DB, brandID, bookingID, learnerID, actorID int6
 	if le.LockedCredits > 0 {
 		leUpd["locked_credits"] = le.LockedCredits - 1
 	}
-	actor := actorID
 	if release {
 		delta := 0
 		var balanceAfter *int
@@ -820,7 +877,7 @@ func settleHoldOnCancel(tx *gorm.DB, brandID, bookingID, learnerID, actorID int6
 			Updates(map[string]interface{}{"status": string(booking.HoldStatusReleased), "released_at": now}).Error; err != nil {
 			return apperr.ErrInternalF("释放权益锁定失败", err)
 		}
-		return insertBookingTransaction(tx, brandID, le.ID, learnerID, &bookingID, &hold.ID, nil, entitlement.ActionRelease, delta, balanceAfter, "取消释放", &actor)
+		return insertBookingTransaction(tx, brandID, le.ID, learnerID, &bookingID, &hold.ID, nil, entitlement.ActionRelease, delta, balanceAfter, "取消释放", actorBy)
 	}
 	// forfeit：没收已扣的课时。
 	leUpd["consumed_credits"] = le.ConsumedCredits + 1
@@ -831,7 +888,7 @@ func settleHoldOnCancel(tx *gorm.DB, brandID, bookingID, learnerID, actorID int6
 		Updates(map[string]interface{}{"status": string(booking.HoldStatusConsumed), "consumed_at": now}).Error; err != nil {
 		return apperr.ErrInternalF("没收权益锁定失败", err)
 	}
-	return insertBookingTransaction(tx, brandID, le.ID, learnerID, &bookingID, &hold.ID, nil, entitlement.ActionConsume, 0, le.RemainingCredits, "取消没收", &actor)
+	return insertBookingTransaction(tx, brandID, le.ID, learnerID, &bookingID, &hold.ID, nil, entitlement.ActionConsume, 0, le.RemainingCredits, "取消没收", actorBy)
 }
 
 // ---- TX-A 签到 / TX-C 爽约：履约结算 hold（Batch 13e）----
