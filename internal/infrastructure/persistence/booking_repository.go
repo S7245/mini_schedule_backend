@@ -424,7 +424,9 @@ func (r *bookingRepository) loadCandidates(tx *gorm.DB, brandID, learnerID, sess
 // → INSERT booking(指定 source) → 锁权益/hold/流水。调用方须已 SELECT FOR UPDATE 锁 sess 行，并自行
 // 处理场次状态/窗口/scope 等前置 + 成功后的 audit。TX-1 代预约(staff_assisted) 与 13d 候补转正
 // (waitlist_promotion) 共用，零逻辑漂移。
-func (r *bookingRepository) placeBooking(tx *gorm.DB, sess *ClassSessionModel, eff booking.EffectivePolicy, brandID, actorID, learnerID int64, mode booking.EntitlementMode, manualEntitlementID *int64, noEntitlementReason, source string, now time.Time) (*BookingModel, error) {
+// assistedBy 为代预约员工 id（FK→brand_users）；C 端学员自助传 nil（assisted_by + txn operated_by 均 NULL，
+// 学员身份靠 brand_learner_profile_id + audit 承载——assisted_by 是 brand_users FK，塞 learner id 会 23503）。
+func (r *bookingRepository) placeBooking(tx *gorm.DB, sess *ClassSessionModel, eff booking.EffectivePolicy, brandID int64, assistedBy *int64, learnerID int64, mode booking.EntitlementMode, manualEntitlementID *int64, noEntitlementReason, source string, now time.Time) (*BookingModel, error) {
 	if sess.BookedCount >= sess.Capacity {
 		return nil, apperr.NewAppError(apperr.ErrSessionFull, "场次已满员", 409)
 	}
@@ -519,7 +521,6 @@ func (r *bookingRepository) placeBooking(tx *gorm.DB, sess *ClassSessionModel, e
 	}
 	sess.BookedCount++
 	// INSERT booking。
-	actor := actorID
 	bk := BookingModel{
 		BrandID:                brandID,
 		ClassSessionID:         sess.ID,
@@ -527,7 +528,7 @@ func (r *bookingRepository) placeBooking(tx *gorm.DB, sess *ClassSessionModel, e
 		Source:                 source,
 		Status:                 string(booking.StatusBooked),
 		BookedAt:               now,
-		AssistedBy:             &actor,
+		AssistedBy:             assistedBy,
 		RequiresEntitlementFix: requiresFix,
 		NoEntitlementReason:    noReason,
 	}
@@ -575,7 +576,7 @@ func (r *bookingRepository) placeBooking(tx *gorm.DB, sess *ClassSessionModel, e
 			}
 			return nil, apperr.ErrInternalF("锁定权益失败", err)
 		}
-		if err := insertBookingTransaction(tx, brandID, chosen.ID, learnerID, &bk.ID, &hold.ID, nil, entitlement.ActionHold, delta, balanceAfter, "预约锁定", &actor); err != nil {
+		if err := insertBookingTransaction(tx, brandID, chosen.ID, learnerID, &bk.ID, &hold.ID, nil, entitlement.ActionHold, delta, balanceAfter, "预约锁定", assistedBy); err != nil {
 			return nil, err
 		}
 	}
@@ -609,8 +610,9 @@ func (r *bookingRepository) Create(ctx context.Context, in booking.CreateInput) 
 		if !booking.WithinBookingWindow(now, sess.StartsAt, eff) {
 			return apperr.NewAppError(apperr.ErrBookingWindowClosed, "当前不在可预约时间窗口内", 409)
 		}
-		// 2-6. 下单核心。
-		bk, err := r.placeBooking(tx, &sess, eff, in.BrandID, in.ActorID, in.BrandLearnerProfileID,
+		// 2-6. 下单核心。staff 代预约：assisted_by = 员工。
+		actor := in.ActorID
+		bk, err := r.placeBooking(tx, &sess, eff, in.BrandID, &actor, in.BrandLearnerProfileID,
 			in.EntitlementMode, in.LearnerEntitlementID, in.NoEntitlementReason, string(booking.SourceStaffAssisted), now)
 		if err != nil {
 			return err

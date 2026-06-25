@@ -266,14 +266,14 @@ func (r *waitlistRepository) Promote(ctx context.Context, in waitlist.PromoteInp
 		if perr != nil {
 			return perr
 		}
-		// 复用下单核心（容量/权益/booked++/booking/hold），source=waitlist_promotion。
-		bk, berr := r.bk.placeBooking(tx, &sess, eff, in.BrandID, in.ActorID, entry.BrandLearnerProfileID,
+		// 复用下单核心（容量/权益/booked++/booking/hold），source=waitlist_promotion。staff 转正：assisted_by = 员工。
+		actor := in.ActorID
+		bk, berr := r.bk.placeBooking(tx, &sess, eff, in.BrandID, &actor, entry.BrandLearnerProfileID,
 			domainbooking.EntitlementMode(in.EntitlementMode), in.LearnerEntitlementID, in.NoEntitlementReason,
 			string(domainbooking.SourceWaitlistPromotion), now)
 		if berr != nil {
 			return berr
 		}
-		actor := in.ActorID
 		if err := tx.Model(&WaitlistEntryModel{}).Where("id = ?", entry.ID).Updates(map[string]interface{}{
 			"status":              string(waitlist.StatusPromoted),
 			"promoted_booking_id": bk.ID,
