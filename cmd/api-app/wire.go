@@ -11,7 +11,9 @@ import (
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
+	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
+	"github.com/zkw/mini-schedule/backend/internal/application/learnerbooking"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
@@ -47,10 +49,16 @@ func initializeAppApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func()
 		persistence.NewAppUserRepository,
 		persistence.NewCourseRepository,
 		persistence.NewTrainingRepository,
+		persistence.NewBookingRepository,
+		persistence.NewClassSessionRepository,
+		persistence.NewLearnerRepository,
+
+		commercial.NewSubscriptionGuard,
 
 		user.NewAppUserService,
 		course.NewService,
 		training.NewService,
+		learnerbooking.NewService,
 
 		appHandler.NewHandler,
 

@@ -69,6 +69,7 @@ func JWTAuth(jwtSvc *cache.Service, userType string) gin.HandlerFunc {
 		c.Set("user_id", payload.UserID)
 		c.Set("brand_id", payload.BrandID)
 		c.Set("user_type", payload.UserType)
+		c.Set("profile_id", payload.ProfileID) // C 端学员 brand_learner_profile_id（Batch 14a 桥接）；非学员为 0。
 
 		c.Next()
 	}
@@ -87,6 +88,16 @@ func GetUserID(c *gin.Context) int64 {
 // GetBrandID 从上下文获取品牌 ID
 func GetBrandID(c *gin.Context) int64 {
 	if v, exists := c.Get("brand_id"); exists {
+		if id, ok := v.(int64); ok {
+			return id
+		}
+	}
+	return 0
+}
+
+// GetProfileID 从上下文获取 C 端学员 brand_learner_profile_id（Batch 14a）；0 = 未桥接（旧 token / 非学员）。
+func GetProfileID(c *gin.Context) int64 {
+	if v, exists := c.Get("profile_id"); exists {
 		if id, ok := v.(int64); ok {
 			return id
 		}

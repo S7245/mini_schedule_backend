@@ -9,7 +9,9 @@ package main
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"github.com/zkw/mini-schedule/backend/internal/application/commercial"
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
+	"github.com/zkw/mini-schedule/backend/internal/application/learnerbooking"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
@@ -38,7 +40,12 @@ func initializeAppApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func()
 	trainingService := training.NewService(trainingRepository, cfg)
 	jwtConfig := provideJWTConfig(cfg)
 	cacheService := cache.NewService(jwtConfig)
-	handler := app.NewHandler(appUserService, service, trainingService, cacheService)
+	bookingRepository := persistence.NewBookingRepository(db)
+	classSessionRepository := persistence.NewClassSessionRepository(db)
+	subscriptionGuard := commercial.NewSubscriptionGuard()
+	learnerRepository := persistence.NewLearnerRepository(db, subscriptionGuard)
+	learnerBookingService := learnerbooking.NewService(bookingRepository, classSessionRepository)
+	handler := app.NewHandler(appUserService, service, trainingService, cacheService, learnerRepository, learnerBookingService)
 	redisConfig := provideRedisConfig(cfg)
 	client, err := cache.NewRedisClient(redisConfig, log)
 	if err != nil {

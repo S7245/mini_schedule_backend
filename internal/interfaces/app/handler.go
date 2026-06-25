@@ -6,8 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/zkw/mini-schedule/backend/internal/application/course"
+	"github.com/zkw/mini-schedule/backend/internal/application/learnerbooking"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
+	learnerdomain "github.com/zkw/mini-schedule/backend/internal/domain/learner"
 	trainingdomain "github.com/zkw/mini-schedule/backend/internal/domain/training"
 	domainuser "github.com/zkw/mini-schedule/backend/internal/domain/user"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/cache"
@@ -18,11 +20,13 @@ import (
 
 // Handler C 端用户 Handler
 type Handler struct {
-	appUserSvc  *user.AppUserService
-	courseSvc   *course.Service
-	trainingSvc *training.Service
-	jwtSvc      *cache.Service
-	validator   *validation.Validator
+	appUserSvc     *user.AppUserService
+	courseSvc      *course.Service
+	trainingSvc    *training.Service
+	jwtSvc         *cache.Service
+	learnerRepo    learnerdomain.Repository // 登录桥接 by-openid find-or-create profile（Batch 14a）。
+	learnerBookSvc *learnerbooking.Service  // C 端自助预约/取消/课程表（Batch 14a）。
+	validator      *validation.Validator
 }
 
 // NewHandler 创建 C 端 Handler
@@ -31,13 +35,17 @@ func NewHandler(
 	courseSvc *course.Service,
 	trainingSvc *training.Service,
 	jwtSvc *cache.Service,
+	learnerRepo learnerdomain.Repository,
+	learnerBookSvc *learnerbooking.Service,
 ) *Handler {
 	return &Handler{
-		appUserSvc:  appUserSvc,
-		courseSvc:   courseSvc,
-		trainingSvc: trainingSvc,
-		jwtSvc:      jwtSvc,
-		validator:   validation.New(),
+		appUserSvc:     appUserSvc,
+		courseSvc:      courseSvc,
+		trainingSvc:    trainingSvc,
+		jwtSvc:         jwtSvc,
+		learnerRepo:    learnerRepo,
+		learnerBookSvc: learnerBookSvc,
+		validator:      validation.New(),
 	}
 }
 
@@ -63,6 +71,14 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		// 训练记录
 		auth.POST("/trainings", h.createTraining)
 		auth.GET("/trainings", h.listMyTrainings)
+
+		// 自助预约（Batch 14a）：课程表只读 + 下单 + 我的预约 + 自助取消 + 权益预览。
+		auth.GET("/class-sessions", h.listClassSessions)
+		auth.GET("/class-sessions/:id", h.getClassSession)
+		auth.POST("/bookings", h.createBooking)
+		auth.GET("/bookings", h.listMyBookings)
+		auth.GET("/bookings/usable-entitlements", h.usableEntitlements)
+		auth.POST("/bookings/:id/cancel", h.cancelBooking)
 	}
 }
 
@@ -125,11 +141,21 @@ func (h *Handler) wechatLogin(c *gin.Context) {
 		isNewUser = true
 	}
 
+	// 桥接（Batch 14a）：find-or-create learner_identity(by openid)+brand_learner_profile(by brand+identity)，
+	// 把 brand_learner_profile_id 带入 token，使 C 端自助预约与 brand 侧操作同一 profile。
+	// app_user 与 learner profile 双轨并存（app_user 留 legacy 课程/训练页）。
+	profile, perr := h.learnerRepo.FindOrCreateProfileByOpenID(c.Request.Context(), req.BrandID, openID, req.Nickname)
+	if perr != nil {
+		response.Error(c, perr)
+		return
+	}
+
 	// 生成 JWT token
 	payload := cache.TokenPayload{
-		UserID:   existingUser.ID,
-		BrandID:  existingUser.BrandID,
-		UserType: "app",
+		UserID:    existingUser.ID,
+		BrandID:   existingUser.BrandID,
+		UserType:  "app",
+		ProfileID: profile.ID,
 	}
 
 	accessToken, err := h.jwtSvc.GenerateToken(payload)
@@ -280,6 +306,119 @@ func (h *Handler) listMyTrainings(c *gin.Context) {
 	}
 
 	response.SuccessPage(c, results, total, page, pageSize)
+}
+
+// ---- 自助预约（Batch 14a）----
+
+func (h *Handler) listClassSessions(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	items, total, err := h.learnerBookSvc.ListSessions(c.Request.Context(), brandID, page, pageSize)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.SuccessPage(c, items, total, page, pageSize)
+}
+
+func (h *Handler) getClassSession(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Error(c, response.ErrInvalidRequest("无效的场次 ID"))
+		return
+	}
+	result, err := h.learnerBookSvc.GetSession(c.Request.Context(), brandID, id)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// CreateBookingRequest 自助下单请求。
+type CreateBookingRequest struct {
+	ClassSessionID int64 `json:"class_session_id" validate:"required,gt=0"`
+}
+
+func (h *Handler) createBooking(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	profileID := middleware.GetProfileID(c)
+
+	var req CreateBookingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
+		return
+	}
+	if err := h.validator.Struct(req); err != nil {
+		response.Error(c, h.validator.InvalidRequest(c, err))
+		return
+	}
+	result, err := h.learnerBookSvc.Book(c.Request.Context(), brandID, profileID, req.ClassSessionID)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+func (h *Handler) listMyBookings(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	profileID := middleware.GetProfileID(c)
+	status := c.Query("status")
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	items, total, err := h.learnerBookSvc.ListMyBookings(c.Request.Context(), brandID, profileID, status, page, pageSize)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.SuccessPage(c, items, total, page, pageSize)
+}
+
+func (h *Handler) usableEntitlements(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	profileID := middleware.GetProfileID(c)
+	sessionID, err := strconv.ParseInt(c.Query("class_session_id"), 10, 64)
+	if err != nil || sessionID <= 0 {
+		response.Error(c, response.ErrInvalidRequest("无效的场次 ID"))
+		return
+	}
+	items, err := h.learnerBookSvc.UsableEntitlements(c.Request.Context(), brandID, profileID, sessionID)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, items)
+}
+
+// CancelBookingRequest 自助取消请求（reason 可选）。
+type CancelBookingRequest struct {
+	Reason string `json:"reason" validate:"omitempty,max=500"`
+}
+
+func (h *Handler) cancelBooking(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	profileID := middleware.GetProfileID(c)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Error(c, response.ErrInvalidRequest("无效的预约 ID"))
+		return
+	}
+	var req CancelBookingRequest
+	// reason 可选：body 为空 / 非法 JSON 时按无原因处理。
+	_ = c.ShouldBindJSON(&req)
+	if verr := h.validator.Struct(req); verr != nil {
+		response.Error(c, h.validator.InvalidRequest(c, verr))
+		return
+	}
+	result, err := h.learnerBookSvc.CancelMyBooking(c.Request.Context(), brandID, profileID, id, req.Reason)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, result)
 }
 
 // 确保使用了 domainuser（避免未使用导入错误）
