@@ -14,6 +14,9 @@ type TokenPayload struct {
 	UserID   int64  `json:"user_id"`
 	BrandID  int64  `json:"brand_id,omitempty"`
 	UserType string `json:"user_type"` // "brand" / "app" / "admin"
+	// ProfileID C 端学员的 brand_learner_profile_id（Batch 14a 桥接）。仅 app 端学员自助 token 携带；
+	// 0 = 未桥接（旧 token 或非学员），业务端点据此判需重新登录。
+	ProfileID int64 `json:"profile_id,omitempty"`
 }
 
 // Service JWT 服务
@@ -36,11 +39,12 @@ func NewService(cfg *config.JWTConfig) *Service {
 func (s *Service) GenerateToken(payload TokenPayload) (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
-		"user_id":   payload.UserID,
-		"brand_id":  payload.BrandID,
-		"user_type": payload.UserType,
-		"iat":       now.Unix(),
-		"exp":       now.Add(s.expire).Unix(),
+		"user_id":    payload.UserID,
+		"brand_id":   payload.BrandID,
+		"user_type":  payload.UserType,
+		"profile_id": payload.ProfileID,
+		"iat":        now.Unix(),
+		"exp":        now.Add(s.expire).Unix(),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -56,12 +60,13 @@ func (s *Service) AccessTokenMaxAge() int {
 func (s *Service) GenerateRefreshToken(payload TokenPayload) (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
-		"user_id":   payload.UserID,
-		"brand_id":  payload.BrandID,
-		"user_type": payload.UserType,
-		"type":      "refresh",
-		"iat":       now.Unix(),
-		"exp":       now.Add(s.refreshExpire).Unix(),
+		"user_id":    payload.UserID,
+		"brand_id":   payload.BrandID,
+		"user_type":  payload.UserType,
+		"profile_id": payload.ProfileID,
+		"type":       "refresh",
+		"iat":        now.Unix(),
+		"exp":        now.Add(s.refreshExpire).Unix(),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -100,6 +105,9 @@ func (s *Service) ParseToken(tokenString string) (*TokenPayload, error) {
 	}
 	if userType, ok := claims["user_type"].(string); ok {
 		payload.UserType = userType
+	}
+	if profileID, ok := claims["profile_id"].(float64); ok {
+		payload.ProfileID = int64(profileID)
 	}
 
 	return payload, nil
