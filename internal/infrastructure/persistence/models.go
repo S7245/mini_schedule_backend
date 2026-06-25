@@ -52,7 +52,7 @@ type AppUserModel struct {
 	Phone     string `gorm:"size:20;index" json:"phone"`
 	Nickname  string `gorm:"size:50" json:"nickname"`
 	AvatarURL string `gorm:"size:500" json:"avatar_url"`
-	VIPLevel  string `gorm:"size:20;not null;default:free" json:"vip_level"`
+	VIPLevel  string `gorm:"column:vip_level;size:20;not null;default:free" json:"vip_level"`
 	Status    string `gorm:"size:20;not null;default:active" json:"status"`
 }
 
