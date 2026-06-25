@@ -119,16 +119,16 @@ func IsValidEntitlementMode(s string) bool {
 // BookAheadMaxMinutes / DailyBookingLimit / WeeklyBookingLimit / ConcurrentBookingLimit
 // 为 nil 表示「不限」。注意：brand_booking_policies 无 monthly 列，月限独家来自权益产品。
 type Policy struct {
-	BookAheadMinMinutes       int   `json:"book_ahead_min_minutes"`
-	BookAheadMaxMinutes       *int  `json:"book_ahead_max_minutes"`
-	CancelDeadlineMinutes     int   `json:"cancel_deadline_minutes"`
-	ReleaseOnCancel           bool  `json:"release_on_cancel"`
-	NoShowConsumesEntitlement bool  `json:"no_show_consumes_entitlement"`
-	DailyBookingLimit         *int  `json:"daily_booking_limit"`
-	WeeklyBookingLimit        *int  `json:"weekly_booking_limit"`
-	ConcurrentBookingLimit    *int  `json:"concurrent_booking_limit"`
-	AllowWaitlist             bool  `json:"allow_waitlist"`
-	WaitlistLimit             int   `json:"waitlist_limit"`
+	BookAheadMinMinutes       int  `json:"book_ahead_min_minutes"`
+	BookAheadMaxMinutes       *int `json:"book_ahead_max_minutes"`
+	CancelDeadlineMinutes     int  `json:"cancel_deadline_minutes"`
+	ReleaseOnCancel           bool `json:"release_on_cancel"`
+	NoShowConsumesEntitlement bool `json:"no_show_consumes_entitlement"`
+	DailyBookingLimit         *int `json:"daily_booking_limit"`
+	WeeklyBookingLimit        *int `json:"weekly_booking_limit"`
+	ConcurrentBookingLimit    *int `json:"concurrent_booking_limit"`
+	AllowWaitlist             bool `json:"allow_waitlist"`
+	WaitlistLimit             int  `json:"waitlist_limit"`
 }
 
 // PolicyOverride 场次覆盖（class_session_policy_overrides；nil 字段 = 继承 base）。
@@ -340,11 +340,13 @@ type LearnerCreateInput struct {
 
 // ListFilter 预约列表查询。零值不过滤；ScopeLocationIDs 非 nil 时按 data_scope 收紧。
 type ListFilter struct {
-	BrandID                int64
-	ClassSessionID         int64
-	LocationID             int64
-	BrandLearnerProfileID  int64
-	Status                 string
+	BrandID               int64
+	ClassSessionID        int64
+	LocationID            int64
+	BrandLearnerProfileID int64
+	Status                string
+	// Statuses 多状态 IN 过滤（Batch 14b 上课记录 attended+no_show）。非空时优先于单 Status。
+	Statuses               []string
 	RequiresEntitlementFix *bool
 	ScopeLocationIDs       []int64
 }

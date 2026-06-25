@@ -172,7 +172,9 @@ func (r *bookingRepository) List(ctx context.Context, f booking.ListFilter, offs
 	if f.BrandLearnerProfileID > 0 {
 		q = q.Where("b.brand_learner_profile_id = ?", f.BrandLearnerProfileID)
 	}
-	if f.Status != "" {
+	if len(f.Statuses) > 0 {
+		q = q.Where("b.status IN ?", f.Statuses)
+	} else if f.Status != "" {
 		q = q.Where("b.status = ?", f.Status)
 	}
 	if f.RequiresEntitlementFix != nil {
