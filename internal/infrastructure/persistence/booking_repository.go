@@ -655,6 +655,17 @@ func (r *bookingRepository) CreateByLearner(ctx context.Context, in booking.Lear
 	var createdID int64
 	now := time.Now().UTC()
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 0. 锁学员档案行：串行化同一学员的自助下单，使 §22.1 跨场次时间重叠校验在并发下也成立
+		//    （重叠跨多个 session，仅锁目标 session 行挡不住「同时约两节互相重叠的不同课」的 TOCTOU）。
+		//    仅本路径锁 profile 行（其它路径不锁 profile→无跨路径死锁）；锁序 profile→session→entitlement。
+		var prof BrandLearnerProfileModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND brand_id = ?", in.BrandLearnerProfileID, in.BrandID).First(&prof).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrLearnerNotFound, "学员不存在", 404)
+			}
+			return apperr.ErrInternalF("查询学员失败", err)
+		}
 		// 1. 锁场次行 + 状态/窗口校验。
 		var sess ClassSessionModel
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
