@@ -24,6 +24,9 @@ func (r *fakeRepo) Create(_ context.Context, in domainlearner.CreateInput) (*dom
 func (r *fakeRepo) GetByID(_ context.Context, _, id int64) (*domainlearner.Profile, error) {
 	return &domainlearner.Profile{ID: id, PrimaryLocationID: r.location, Status: domainlearner.StatusActive}, nil
 }
+func (r *fakeRepo) FindOrCreateProfileByOpenID(_ context.Context, _ int64, _, _ string) (*domainlearner.Profile, error) {
+	return &domainlearner.Profile{ID: 1, Status: domainlearner.StatusActive}, nil
+}
 func (r *fakeRepo) List(_ context.Context, _ domainlearner.ListFilter, _, _ int) ([]*domainlearner.Profile, int64, error) {
 	return []*domainlearner.Profile{}, 0, nil
 }

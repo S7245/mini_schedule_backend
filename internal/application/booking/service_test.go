@@ -58,6 +58,12 @@ func (r *fakeRepo) ConfirmNoShow(_ context.Context, _, _, id int64, _ string) (*
 	r.noShowCalled = true
 	return &domainbooking.Booking{ID: id, Status: domainbooking.StatusNoShow}, nil
 }
+func (r *fakeRepo) CreateByLearner(_ context.Context, _ domainbooking.LearnerCreateInput) (*domainbooking.Booking, error) {
+	return &domainbooking.Booking{ID: 1, Source: domainbooking.SourceLearnerSelfService, Status: domainbooking.StatusBooked}, nil
+}
+func (r *fakeRepo) CancelByLearner(_ context.Context, _, _, id int64, _ string) (*domainbooking.Booking, error) {
+	return &domainbooking.Booking{ID: id, Status: domainbooking.StatusCancelled}, nil
+}
 
 // captureChecker 记录 Require 收到的权限码，验证每个方法门的权限正确。
 type captureChecker struct {
