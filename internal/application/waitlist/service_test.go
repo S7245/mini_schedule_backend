@@ -28,6 +28,12 @@ func (r *fakeRepo) ListBySession(_ context.Context, _, _ int64, scope []int64) (
 func (r *fakeRepo) GetByID(_ context.Context, _, id int64) (*domainwaitlist.Entry, error) {
 	return &domainwaitlist.Entry{ID: id, LocationID: r.location, Status: domainwaitlist.StatusWaiting}, nil
 }
+func (r *fakeRepo) ListByLearner(_ context.Context, _, _ int64) ([]*domainwaitlist.Entry, error) {
+	return nil, nil
+}
+func (r *fakeRepo) CancelByLearner(_ context.Context, _, _, id int64) (*domainwaitlist.Entry, error) {
+	return &domainwaitlist.Entry{ID: id, Status: domainwaitlist.StatusCancelled}, nil
+}
 func (r *fakeRepo) Promote(_ context.Context, in domainwaitlist.PromoteInput) (*domainwaitlist.Entry, error) {
 	r.promoteCalled = true
 	return &domainwaitlist.Entry{ID: in.EntryID, Status: domainwaitlist.StatusPromoted}, nil
