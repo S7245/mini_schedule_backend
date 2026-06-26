@@ -252,3 +252,20 @@ main.go 默认读 configs/config.yaml（端口 8081，撞 api-brand）；必须 
 
 ### 多状态 filter（上课记录）+ learnerbooking 聚合
 booking `ListFilter` 加 `Statuses []string`：repo List `len(Statuses)>0` 用 `status IN`，否则沿用单 `Status`（brand 侧只用 Status，零回归）。learnerbooking.Service 的 `ListMyBookings` 把 `status` 逗号 split 进 Statuses（单值=单元素），故 GET /bookings?status=attended,no_show 即上课记录、status=booked 即即将上课，**一个端点两用，零新端点**。Service 现聚合 booking+classsession+entitlement+waitlist 四 repo（C 端单一应用服务）；ListMyEntitlements 复用 entitlement repo 的 RBAC-free + settle-on-read（C 端读自动落库正确过期态）。
+
+## 2026-06-26 Batch 15 — 场次状态自动化（asynq 接入 + 自动状态机）
+
+### system actor 复用既有事务 = actor 参数化（14a FK-NULL 模式的姊妹）
+自动结束场次 = 定时调既有 13e `EndSession`，但 audit 须 `actor_type=system`。抽 `applyEndSession(tx, sess, actor audit.Actor)` 核心，`EndSession`(brand_user+data_scope) 与 `EndSessionSystem`(system，按 id 锁、跨品牌、无 scope) 共用；`audit.Write` 在 `actor.ID==0` 时不写 actor_id→NULL，`ActorSystem` 已存、DB CHECK 已含 'system'，**无 brand_users FK**。这是 14a「学员自助写 *_by 列传 NULL」的姊妹——**system 写 audit 走 actor_id NULL**。改后复跑 13c/13d/13e 全绿（brand_user 路径字节等价：旧 `bID:=brandID`、新 `bID:=sess.BrandID`，sess 由 `WHERE id AND brand_id` 取，二者恒等）。
+
+### 自动状态机的幂等 = 状态守卫 + 扫描 query 自然收敛（不需 asynq.Unique）
+periodic sweep（`MarkSessionsInProgress` 批量 scheduled→in_progress + `ListDueSessionIDs` 逐场次 `EndSessionSystem`）幂等三重：①`MarkSessionsInProgress` 的 `WHERE status='scheduled'` 重跑空操作；②`EndSessionSystem` 状态守卫 completed→`SESSION_NOT_ENDABLE`；③**已转场次直接掉出 `ListDueSessionIDs`（status 已变），下一轮不再现身**——live 验收：worker 连跑 8 轮，首轮 `ended=3` 后全 `ended=0`，仅 1 条 audit。故 `asynq.Unique` 非必需（幂等是真正安全网）。每场次独立 tx = 失败隔离；systemic 查询失败返 error 触发 asynq 重试，单场次失败 log+continue 下一 tick 自愈（NotEndable/NotFound 良性竞态按 skipped 计，不刷 error）。
+
+### 引入「显示态」枚举值要审计所有 `status == 'scheduled'` 守卫（code-review F1）
+自动 `scheduled→in_progress` 号称「纯显示态」，但 booking `Create`/`CreateByLearner` + waitlist `Join`/`Promote` 守卫都是 `status != 'scheduled'`——**尤其 waitlist `Promote` 不过时间窗**（候补已承诺），场次自动转 in_progress 后「课已开始、有人腾位、转正候补者」工作流被悄悄阻断（booking Create 因时间窗已关只是错误码变，无功能回归）。教训：**新增一个与既有态语义等价的 status 值时，必须 `grep "status.*scheduled"` 把所有把它当门的守卫一并放宽**（这里改 4 处为 `NOT IN (scheduled,in_progress)`：真实门是时间窗/容量）。brainstorm 只验了 booking-create 时间窗、漏了 waitlist promote 不过窗——审计要覆盖「跳过常规校验」的旁路。
+
+### 时钟可控靠扫描 query 参数化 now，不靠改墙钟
+`EndSessionSystem` 本身时间无关（纯状态）；唯一的 now 在扫描 query（`ends_at<=now`/`starts_at<=now<ends_at`）。repo 方法收 `now time.Time` 参数→单测注入固定时钟、live 验收造「过去 ends_at」数据免等真实墙钟。worker handler 传 `time.Now().UTC()`，DB timestamptz 比较瞬时正确。
+
+### 独立 cmd/worker：手动 DI 优于 Wire（小图）+ 不跑 migration
+worker 依赖图仅 3 节点（db→bookingRepo→sessionautomation.Service），`persistence.NewDatabase` 无 cleanup 返回、wire 工具有 go.sum 摩擦→**手动 DI** 更清晰（设计文档 §2.1 允许）。asynq 用 `RedisClientOpt`（复用 redis 段，key 前缀 `asynq:` 与 `rbac:` 不撞），Scheduler+Server 同进程、**部署须 replicas=1**（Scheduler 多副本重复 enqueue）。worker **不跑 migration**（schema 由 api-* 负责）。`go mod tidy` 须等 cmd/worker import asynq 后再跑，否则会把未引用的 require 删掉。
