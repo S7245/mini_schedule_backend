@@ -8,22 +8,32 @@ package learnerbooking
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	domainbooking "github.com/zkw/mini-schedule/backend/internal/domain/booking"
 	domainsession "github.com/zkw/mini-schedule/backend/internal/domain/classsession"
+	domainent "github.com/zkw/mini-schedule/backend/internal/domain/entitlement"
+	domainwaitlist "github.com/zkw/mini-schedule/backend/internal/domain/waitlist"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
 
 // Service 学员自助预约应用服务。
 type Service struct {
-	bookingRepo domainbooking.Repository
-	sessionRepo domainsession.Repository
+	bookingRepo  domainbooking.Repository
+	sessionRepo  domainsession.Repository
+	entRepo      domainent.Repository
+	waitlistRepo domainwaitlist.Repository
 }
 
 // NewService 创建 Service。
-func NewService(bookingRepo domainbooking.Repository, sessionRepo domainsession.Repository) *Service {
-	return &Service{bookingRepo: bookingRepo, sessionRepo: sessionRepo}
+func NewService(
+	bookingRepo domainbooking.Repository,
+	sessionRepo domainsession.Repository,
+	entRepo domainent.Repository,
+	waitlistRepo domainwaitlist.Repository,
+) *Service {
+	return &Service{bookingRepo: bookingRepo, sessionRepo: sessionRepo, entRepo: entRepo, waitlistRepo: waitlistRepo}
 }
 
 // requireProfile 校验登录态带 profile（token 无 profile_id → 桥接前旧 token，需重新登录）。
@@ -78,16 +88,23 @@ func (s *Service) Book(ctx context.Context, brandID, profileID, sessionID int64)
 	})
 }
 
-// ListMyBookings 我的预约（**强制**按 token profile 过滤，不接受前端传 learner 参数）。status 可选。
+// ListMyBookings 我的预约（**强制**按 token profile 过滤，不接受前端传 learner 参数）。
+// status 可选，支持逗号分隔多状态（上课记录传 "attended,no_show"，14b）→ ListFilter.Statuses。
 func (s *Service) ListMyBookings(ctx context.Context, brandID, profileID int64, status string, page, pageSize int) ([]*domainbooking.Booking, int64, error) {
 	if err := requireProfile(profileID); err != nil {
 		return nil, 0, err
 	}
 	offset, limit := clampPage(page, pageSize)
+	var statuses []string
+	for _, s := range strings.Split(status, ",") {
+		if t := strings.TrimSpace(s); t != "" {
+			statuses = append(statuses, t)
+		}
+	}
 	return s.bookingRepo.List(ctx, domainbooking.ListFilter{
 		BrandID:               brandID,
 		BrandLearnerProfileID: profileID,
-		Status:                status,
+		Statuses:              statuses,
 	}, offset, limit)
 }
 
@@ -105,4 +122,46 @@ func (s *Service) UsableEntitlements(ctx context.Context, brandID, profileID, se
 		return nil, err
 	}
 	return s.bookingRepo.UsableEntitlements(ctx, brandID, sessionID, profileID, nil)
+}
+
+// ---- 14b 增量：我的权益 + 加入候补 ----
+
+// ListMyEntitlements 我的权益（本 profile；repo 读触发 settle 落库，expired/depleted 正确）。
+func (s *Service) ListMyEntitlements(ctx context.Context, brandID, profileID int64) ([]*domainent.Entitlement, error) {
+	if err := requireProfile(profileID); err != nil {
+		return nil, err
+	}
+	return s.entRepo.ListEntitlementsByLearner(ctx, brandID, profileID)
+}
+
+// JoinWaitlist 满员场次自助加入候补（SelfService：operated_by NULL + audit learner + 不锁权益 §22.4）。
+func (s *Service) JoinWaitlist(ctx context.Context, brandID, profileID, sessionID int64) (*domainwaitlist.Entry, error) {
+	if err := requireProfile(profileID); err != nil {
+		return nil, err
+	}
+	if sessionID <= 0 {
+		return nil, apperr.NewAppError(apperr.ErrInvalidParam, "场次不能为空", 400)
+	}
+	return s.waitlistRepo.Join(ctx, domainwaitlist.JoinInput{
+		BrandID:               brandID,
+		ClassSessionID:        sessionID,
+		BrandLearnerProfileID: profileID,
+		SelfService:           true,
+	})
+}
+
+// ListMyWaitlist 我的候补（本 profile 活跃候补）。
+func (s *Service) ListMyWaitlist(ctx context.Context, brandID, profileID int64) ([]*domainwaitlist.Entry, error) {
+	if err := requireProfile(profileID); err != nil {
+		return nil, err
+	}
+	return s.waitlistRepo.ListByLearner(ctx, brandID, profileID)
+}
+
+// CancelMyWaitlist 自助取消候补（所有权在 repo tx 内校验，越权 WAITLIST_ENTRY_NOT_FOUND）。
+func (s *Service) CancelMyWaitlist(ctx context.Context, brandID, profileID, id int64) (*domainwaitlist.Entry, error) {
+	if err := requireProfile(profileID); err != nil {
+		return nil, err
+	}
+	return s.waitlistRepo.CancelByLearner(ctx, brandID, profileID, id)
 }

@@ -52,6 +52,8 @@ func initializeAppApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func()
 		persistence.NewBookingRepository,
 		persistence.NewClassSessionRepository,
 		persistence.NewLearnerRepository,
+		persistence.NewEntitlementRepository,
+		persistence.NewWaitlistRepository,
 
 		commercial.NewSubscriptionGuard,
 
