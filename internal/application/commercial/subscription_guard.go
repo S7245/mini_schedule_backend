@@ -21,10 +21,12 @@ const (
 	ResourceLearner  ResourceKind = "learner"
 )
 
-// SubscriptionGuard 在事务内做"锁 active subscription → COUNT 资源 → 比 max"三段式。
+// SubscriptionGuard 在事务内做"锁可用 subscription → COUNT 资源 → 比 max"三段式。
 //
 // 调用方负责自己的 INSERT；guard 只做"锁 + 数 + 判"。
 // 双窗口（grace_ends_at 优先于 expires_at）保留 Batch 4 review #2 的修复。
+// Batch 16：可用态从 active 放宽为 active+grace_period（宽限期视同可用），
+// 仍由时间门 grace_ends_at>now 把关；restricted/expired/frozen/cancelled 一律拦。
 type SubscriptionGuard struct{}
 
 // NewSubscriptionGuard 创建 guard（无状态，单例即可）。
@@ -47,7 +49,7 @@ type guardSubscriptionRow struct {
 
 // CheckAndCount 在外部传入的 tx 里执行：
 //
-//  1. SELECT FOR UPDATE active 且未过期的 subscription
+//  1. SELECT FOR UPDATE 可用（active/grace_period）且未过期的 subscription
 //  2. COUNT 当前 brand 下该 kind 的资源（排除软删，包含 inactive）
 //  3. 超 max → 返 QUOTA_EXCEEDED + Details{current, max}
 //     未超 → 返 (count, max, nil)
@@ -72,8 +74,8 @@ func (g *SubscriptionGuard) CheckAndCount(
 		Table("brand_subscriptions").
 		Select("id, brand_id, status, expires_at, grace_ends_at, max_locations, max_staff_seats, max_learners").
 		Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("brand_id = ? AND status = ? AND (grace_ends_at > ? OR (grace_ends_at IS NULL AND expires_at > ?))",
-			brandID, "active", now, now).
+		Where("brand_id = ? AND status IN ? AND (grace_ends_at > ? OR (grace_ends_at IS NULL AND expires_at > ?))",
+			brandID, []string{"active", "grace_period"}, now, now).
 		Order("id DESC").
 		First(&sub).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
