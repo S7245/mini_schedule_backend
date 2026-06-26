@@ -49,15 +49,17 @@ type waitlistRow struct {
 	SessionStartsAt time.Time `gorm:"column:session_starts_at"`
 	CourseTitle     string    `gorm:"column:course_title"`
 	LocationID      int64     `gorm:"column:location_id"`
+	LocationName    string    `gorm:"column:location_name"`
 }
 
 func (r *waitlistRepository) baseQuery(ctx context.Context) *gorm.DB {
 	return r.db.WithContext(ctx).Table("waitlist_entries w").
 		Select(`w.*,
 			COALESCE(NULLIF(p.nickname, ''), li.nickname) AS learner_name, li.phone AS learner_phone,
-			cs.starts_at AS session_starts_at, c.title AS course_title, cs.location_id`).
+			cs.starts_at AS session_starts_at, c.title AS course_title, cs.location_id, l.name AS location_name`).
 		Joins("JOIN class_sessions cs ON cs.id = w.class_session_id").
 		Joins("JOIN courses c ON c.id = cs.course_id").
+		Joins("JOIN locations l ON l.id = cs.location_id").
 		Joins("JOIN brand_learner_profiles p ON p.id = w.brand_learner_profile_id").
 		Joins("JOIN learner_identities li ON li.id = p.learner_identity_id")
 }
@@ -78,6 +80,7 @@ func toWaitlistDomain(r *waitlistRow) *waitlist.Entry {
 		SessionStartsAt:       r.SessionStartsAt,
 		CourseTitle:           r.CourseTitle,
 		LocationID:            r.LocationID,
+		LocationName:          r.LocationName,
 	}
 	if r.SkippedReason != nil {
 		e.SkippedReason = *r.SkippedReason
@@ -123,6 +126,51 @@ func (r *waitlistRepository) ListBySession(ctx context.Context, brandID, session
 		items[i] = toWaitlistDomain(&rows[i])
 	}
 	return items, nil
+}
+
+// ListByLearner C 端「我的候补」（Batch 14b）：本 profile 活跃候补，按场次时间序。
+func (r *waitlistRepository) ListByLearner(ctx context.Context, brandID, profileID int64) ([]*waitlist.Entry, error) {
+	var rows []waitlistRow
+	if err := r.baseQuery(ctx).
+		Where("w.brand_id = ? AND w.brand_learner_profile_id = ? AND w.status IN ('waiting','eligible_to_promote')", brandID, profileID).
+		Order("cs.starts_at ASC, w.id ASC").Scan(&rows).Error; err != nil {
+		return nil, apperr.ErrInternalF("查询我的候补失败", err)
+	}
+	items := make([]*waitlist.Entry, len(rows))
+	for i := range rows {
+		items[i] = toWaitlistDomain(&rows[i])
+	}
+	return items, nil
+}
+
+// CancelByLearner C 端自助取消候补（Batch 14b）：tx 内校所有权 + waiting/eligible→cancelled + operated_by NULL +
+// audit actor=learner。镜像 transition 但带 profile 条件（越权 WAITLIST_ENTRY_NOT_FOUND 404）。
+func (r *waitlistRepository) CancelByLearner(ctx context.Context, brandID, profileID, id int64) (*waitlist.Entry, error) {
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var entry WaitlistEntryModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND brand_id = ? AND brand_learner_profile_id = ?", id, brandID, profileID).First(&entry).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrWaitlistEntryNotFound, "候补不存在", 404)
+			}
+			return apperr.ErrInternalF("查询候补失败", err)
+		}
+		if entry.Status != string(waitlist.StatusWaiting) && entry.Status != string(waitlist.StatusEligibleToPromote) {
+			return apperr.NewAppError(apperr.ErrWaitlistNotPromotable, "该候补当前不可取消", 409)
+		}
+		before := entry
+		if err := tx.Model(&WaitlistEntryModel{}).Where("id = ?", entry.ID).
+			Updates(map[string]interface{}{"status": string(waitlist.StatusCancelled), "operated_by": nil}).Error; err != nil {
+			return apperr.ErrInternalF("取消候补失败", err)
+		}
+		after := entry
+		after.Status = string(waitlist.StatusCancelled)
+		return writeWaitlistLogAs(tx, audit.Actor{Type: audit.ActorLearner, ID: profileID}, brandID, "waitlist_cancelled", entry.ID, &before, &after)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.GetByID(ctx, brandID, id)
 }
 
 // ---- W1 加入候补 ----

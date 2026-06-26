@@ -50,6 +50,7 @@ type Entry struct {
 	SessionStartsAt time.Time `json:"session_starts_at"`
 	CourseTitle     string    `json:"course_title"`
 	LocationID      int64     `json:"location_id"`
+	LocationName    string    `json:"location_name"`
 }
 
 // JoinInput 加入候补入参。ScopeLocationIDs 非 nil 时 repo 内按 data_scope 守卫场次（越权 404）。
@@ -80,6 +81,11 @@ type Repository interface {
 	Join(ctx context.Context, in JoinInput) (*Entry, error)
 	// ListBySession 按 position 列该场次候补（scopeLocationIDs 非 nil 时守卫场次门店）。
 	ListBySession(ctx context.Context, brandID, sessionID int64, scopeLocationIDs []int64) ([]*Entry, error)
+	// ListByLearner C 端「我的候补」（Batch 14b）：本 profile 活跃(waiting/eligible)候补，按场次时间序。
+	ListByLearner(ctx context.Context, brandID, profileID int64) ([]*Entry, error)
+	// CancelByLearner C 端自助取消候补（Batch 14b）：tx 内校所有权（越权 WAITLIST_ENTRY_NOT_FOUND 404）+
+	// waiting/eligible→cancelled + operated_by NULL + audit actor=learner。
+	CancelByLearner(ctx context.Context, brandID, profileID, id int64) (*Entry, error)
 	GetByID(ctx context.Context, brandID, id int64) (*Entry, error)
 	// Promote 锁 session+entry → 校 waiting + 容量 → placeBooking(waitlist_promotion) → entry promoted+promoted_booking_id。
 	Promote(ctx context.Context, in PromoteInput) (*Entry, error)
