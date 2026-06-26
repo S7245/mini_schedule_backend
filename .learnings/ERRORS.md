@@ -214,3 +214,7 @@ brand/admin router 都 r.Use(middleware.CORS(cfg.CORS))，唯 app router 只有 
 ## 2026-06-26 Batch 14b — 零新缺陷（14a 地基已稳）
 14b 实现 + code-review(2 路) + 冒烟(API+psql+浏览器) **零 P0/P1、零新 bug**——14a 已修的 3 个 C 端 greenfield 阻断(vip_level/CORS/brand_id)打好地基，14b 纯增量直接跑通。印证 14a/14b 拆批正确：高风险桥接隔离在 14a 单独验收，14b 复用已验证模式即稳。
 - 测试技巧：上课记录(终态)冒烟无现成 attended booking 时，psql `UPDATE bookings SET status='attended'` 造数据验多状态 filter+展示（落库语义不重要，仅验 C 端读）。
+
+## 2026-06-27 Batch 16（订阅生命周期自动化，测试编写踩坑）
+- **`idx_brand_subscriptions_one_current` UNIQUE(brand_id) WHERE status IN (active,grace_period,restricted,frozen)**：DB 单测/live 造数据时，同一 brand 不能有 2 条处于该集合的 sub。每个测试态(active/grace/restricted/frozen)须各自 `seedBrandWithSystemRoles` 独立 brand。live 验收同理：brand21 已有 active sub→另造隔离测试品牌，勿在其上再插。同时这也是转换安全网：grace/restricted 转换在集合内**移动同一行**不新增→不撞唯一约束。
+- **grace_ends_at 单测精度**：转换 `grace_ends_at = sub.ExpiresAt(GORM 读回, timestamptz 微秒).AddDate(0,0,N)`；断言别拿「Go 原始纳秒 expires + N 天」比(亚微秒抖动 flaky)，改读回 DB expires_at 再 AddDate 对齐。波及：任何造「过去时间 + 算派生时间戳」的 DB 单测。

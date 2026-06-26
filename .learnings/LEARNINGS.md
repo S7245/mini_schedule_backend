@@ -269,3 +269,17 @@ periodic sweep（`MarkSessionsInProgress` 批量 scheduled→in_progress + `List
 
 ### 独立 cmd/worker：手动 DI 优于 Wire（小图）+ 不跑 migration
 worker 依赖图仅 3 节点（db→bookingRepo→sessionautomation.Service），`persistence.NewDatabase` 无 cleanup 返回、wire 工具有 go.sum 摩擦→**手动 DI** 更清晰（设计文档 §2.1 允许）。asynq 用 `RedisClientOpt`（复用 redis 段，key 前缀 `asynq:` 与 `rbac:` 不撞），Scheduler+Server 同进程、**部署须 replicas=1**（Scheduler 多副本重复 enqueue）。worker **不跑 migration**（schema 由 api-* 负责）。`go mod tidy` 须等 cmd/worker import asynq 后再跑，否则会把未引用的 require 删掉。
+
+## 2026-06-27 Batch 16（订阅生命周期自动化）
+
+### 复用 asynq worker 加第 2 条 periodic task（Batch 15 范式直接镜像）
+同一 `cmd/worker` 进程、同一 asynq `Server`/`ServeMux` 消费两类任务（`session:sweep` + `subscription:sweep`），`Scheduler.Register` 两条 cron。新增成本极低：窄 `Repository` 接口 + `application/<域>.Service.RunSweep(now)` + `interfaces/worker.<X>SweepHandler` + `config.WorkerConfig` 加字段 + 手动 DI 接线。task type 字符串互异即无路由冲突（`mux.HandleFunc` 同 pattern 才 panic）。订阅转换天级粒度→cron `@every 1h`（vs 场次分钟级 `@every 1m`），更轻。
+
+### 逐 sub 系统事务抽公共骨架 `applySubscriptionTransition`（镜像 `applyEndSession`）
+两个转换法（grace/restricted）~95% 同构：锁行(by id, 无 brand 过滤, 系统跨品牌)→NotFound 良性 skip→**锁后状态守卫**(幂等+并发：平台已改动则空操作不覆盖人工权威)→UPDATE→`audit.Write(actor=system)`。抽 `applySubscriptionTransition(ctx, id, plan func(sub)*plan)`，plan 闭包返 nil=守卫不过良性 skip，否则返 {updates, action, after}。**两同构系统转换法务必抽骨架**（booking 早有 `applyEndSession` 先例），否则锁/audit/skip 逻辑改动要手工同步两份易漂移（code-review D 标注）。守卫不过返 `(bool,error)` 的 `(false,nil)`——比 error-sentinel 更干净（转换仅 worker 调用，无需新错误码）。
+
+### 放宽资源门要先穷尽「把 status 当门」的所有点（Batch 15 F1 重演，这次审计在前）
+把 `grace_period` 从「纯枚举」变「guard 视同可用」前，全仓 grep 确认 `SubscriptionGuard.CheckAndCount` 是**唯一**把 `subscription.status='active'` 当资源供给门的点（class_session/entitlement/booking repo 完全不查订阅 status）；其余 `BrandSubscriptionStatusActive` 引用全是续期/summary/回调**写入**（非门）。改 `status='active'` → `status IN ('active','grace_period')`，时间门不变（active+已过期仍读时拦=纵深防御）。零回归证明=六态走查 DB 单测 + 复跑 Batch 4/5/13a 配额测试。
+
+### grace_ends_at 用 `expires_at.AddDate(0,0,graceDays)`（日历日，与 computeSubscriptionExpiry 一致）+ 单测精度对齐
+转换时 `grace_ends_at = sub.ExpiresAt.AddDate(0,0,graceDays)`，`sub.ExpiresAt` 是 GORM 从 timestamptz 读回(微秒精度)。单测断言别用「Go 原始纳秒 expires + N 天」(亚微秒抖动)，而是**读回 DB 的 expires_at 再 AddDate** 对齐。一轮自愈：长期过期 sub（expires 与 expires+graceDays 均≤now）phase1 翻 grace（grace_ends_at≤now）→phase2 同轮翻 restricted（phase1 的写对 phase2 扫描可见，真实 PG 集成测证）。
