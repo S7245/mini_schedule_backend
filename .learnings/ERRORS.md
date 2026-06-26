@@ -210,3 +210,7 @@ brand/admin router 都 r.Use(middleware.CORS(cfg.CORS))，唯 app router 只有 
 
 ### 规律：greenfield 端「单测+build 全绿但端到端必崩」
 上述 3 个（含前端 brand_id）都是 C 端从未真跑过的代码路径，DB 单测/prod build 全过，只有真起 api-app + 浏览器跑登录→预约才暴露。新「greenfield 端」批验收必须真起服务跑通浏览器。
+
+## 2026-06-26 Batch 14b — 零新缺陷（14a 地基已稳）
+14b 实现 + code-review(2 路) + 冒烟(API+psql+浏览器) **零 P0/P1、零新 bug**——14a 已修的 3 个 C 端 greenfield 阻断(vip_level/CORS/brand_id)打好地基，14b 纯增量直接跑通。印证 14a/14b 拆批正确：高风险桥接隔离在 14a 单独验收，14b 复用已验证模式即稳。
+- 测试技巧：上课记录(终态)冒烟无现成 attended booking 时，psql `UPDATE bookings SET status='attended'` 造数据验多状态 filter+展示（落库语义不重要，仅验 C 端读）。

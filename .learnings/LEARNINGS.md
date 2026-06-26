@@ -241,3 +241,14 @@ learner 路径加 hasOverlappingBooking（cs.starts<new.ends AND cs.ends>new.sta
 
 ### api-app 启动需 CONFIG_PATH=configs/config-app.yaml
 main.go 默认读 configs/config.yaml（端口 8081，撞 api-brand）；必须 CONFIG_PATH=configs/config-app.yaml 才跑 :8082。
+
+## 2026-06-26 Batch 14b — C 端自助增量（我的权益 + 上课记录 + 加入候补）
+
+### 候补学员路径镜像 14a（FK-NULL 模式第 4 个落点）
+`waitlist_entries.operated_by` 也是 brand_users FK——继 14a 的 assisted_by/cancelled_by/txn operated_by 之后第 4 个「学员自助须传 NULL」的列。`Join` 加 `JoinInput.SelfService`：true→operated_by NULL + audit Actor{ActorLearner, profileID} + scope nil；false(staff 默认)→operated_by=ActorID 不变。`writeWaitlistLog` 抽 `writeWaitlistLogAs(actor)`（镜像 14a writeBookingLogAs）。规律固化：**凡 C 端学员自助写带 operated_by/assisted_by/cancelled_by/actor 的表，那些列是 brand_users FK→必传 NULL，身份靠 brand_learner_profile_id + audit actor=learner 承载**。复跑 13d 零回归。
+
+### 新 ListByLearner/CancelByLearner（13d 只有 by-session）
+13d 候补只做 staff 的 ListBySession；C 端「我的候补」须新增 `ListByLearner`（本 profile 活跃 waiting/eligible，场次时间序）。`CancelByLearner` 镜像 booking CancelByLearner：tx 内 `WHERE id AND brand_id AND brand_learner_profile_id` 锁定→越权 WAITLIST_ENTRY_NOT_FOUND 404，operated_by NULL，audit learner。baseQuery 加 `JOIN locations l`+location_name（反范式，惠及 staff drawer；location NOT NULL 故 inner join 不丢行）。
+
+### 多状态 filter（上课记录）+ learnerbooking 聚合
+booking `ListFilter` 加 `Statuses []string`：repo List `len(Statuses)>0` 用 `status IN`，否则沿用单 `Status`（brand 侧只用 Status，零回归）。learnerbooking.Service 的 `ListMyBookings` 把 `status` 逗号 split 进 Statuses（单值=单元素），故 GET /bookings?status=attended,no_show 即上课记录、status=booked 即即将上课，**一个端点两用，零新端点**。Service 现聚合 booking+classsession+entitlement+waitlist 四 repo（C 端单一应用服务）；ListMyEntitlements 复用 entitlement repo 的 RBAC-free + settle-on-read（C 端读自动落库正确过期态）。
