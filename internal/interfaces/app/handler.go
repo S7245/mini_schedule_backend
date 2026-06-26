@@ -79,6 +79,12 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		auth.GET("/bookings", h.listMyBookings)
 		auth.GET("/bookings/usable-entitlements", h.usableEntitlements)
 		auth.POST("/bookings/:id/cancel", h.cancelBooking)
+
+		// 自助增量（Batch 14b）：我的权益 + 加入/我的/取消候补。上课记录复用 GET /bookings?status=attended,no_show。
+		auth.GET("/entitlements", h.listEntitlements)
+		auth.POST("/waitlist", h.joinWaitlist)
+		auth.GET("/waitlist", h.listMyWaitlist)
+		auth.POST("/waitlist/:id/cancel", h.cancelWaitlist)
 	}
 }
 
@@ -414,6 +420,71 @@ func (h *Handler) cancelBooking(c *gin.Context) {
 		return
 	}
 	result, err := h.learnerBookSvc.CancelMyBooking(c.Request.Context(), brandID, profileID, id, req.Reason)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// ---- 自助增量（Batch 14b）----
+
+func (h *Handler) listEntitlements(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	profileID := middleware.GetProfileID(c)
+	items, err := h.learnerBookSvc.ListMyEntitlements(c.Request.Context(), brandID, profileID)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, items)
+}
+
+// JoinWaitlistRequest 加入候补请求。
+type JoinWaitlistRequest struct {
+	ClassSessionID int64 `json:"class_session_id" validate:"required,gt=0"`
+}
+
+func (h *Handler) joinWaitlist(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	profileID := middleware.GetProfileID(c)
+	var req JoinWaitlistRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, response.ErrInvalidRequest("请求参数错误"))
+		return
+	}
+	if err := h.validator.Struct(req); err != nil {
+		response.Error(c, h.validator.InvalidRequest(c, err))
+		return
+	}
+	result, err := h.learnerBookSvc.JoinWaitlist(c.Request.Context(), brandID, profileID, req.ClassSessionID)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+func (h *Handler) listMyWaitlist(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	profileID := middleware.GetProfileID(c)
+	items, err := h.learnerBookSvc.ListMyWaitlist(c.Request.Context(), brandID, profileID)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, items)
+}
+
+func (h *Handler) cancelWaitlist(c *gin.Context) {
+	brandID := middleware.GetBrandID(c)
+	profileID := middleware.GetProfileID(c)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Error(c, response.ErrInvalidRequest("无效的候补 ID"))
+		return
+	}
+	result, err := h.learnerBookSvc.CancelMyWaitlist(c.Request.Context(), brandID, profileID, id)
 	if err != nil {
 		response.Error(c, err)
 		return
