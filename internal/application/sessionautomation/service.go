@@ -55,9 +55,10 @@ func (s *Service) RunSweep(ctx context.Context, now time.Time) (Summary, error) 
 	}
 	for _, id := range ids {
 		if _, err := s.repo.EndSessionSystem(ctx, id); err != nil {
-			// 并发已被结束/取消：幂等空操作，按 skipped 计，不算失败。
+			// 并发已被结束/取消（NotEndable）或已删除（NotFound）：幂等空操作，按 skipped 计，
+			// 不算失败（这些是 List→End 之间的良性竞态，不应刷 error 日志或抬高 failed 指标）。
 			var ae *apperr.AppError
-			if errors.As(err, &ae) && ae.Code == apperr.ErrSessionNotEndable {
+			if errors.As(err, &ae) && (ae.Code == apperr.ErrSessionNotEndable || ae.Code == apperr.ErrSessionNotFound) {
 				sum.Skipped++
 				continue
 			}

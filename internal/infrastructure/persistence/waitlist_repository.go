@@ -189,7 +189,9 @@ func (r *waitlistRepository) Join(ctx context.Context, in waitlist.JoinInput) (*
 		if in.ScopeLocationIDs != nil && !int64InSlice(sess.LocationID, in.ScopeLocationIDs) {
 			return apperr.NewAppError(apperr.ErrSessionNotFound, "场次不存在", 404)
 		}
-		if sess.Status != "scheduled" {
+		// Batch 15：in_progress 视同 scheduled（自动状态机仅改显示态，不新增候补/转正门，
+		// 转正实际由容量把关）。否则场次到点自动转 in_progress 后无法再把已候补学员转正。
+		if sess.Status != "scheduled" && sess.Status != "in_progress" {
 			return apperr.NewAppError(apperr.ErrSessionNotBookable, "场次当前不可预约", 409)
 		}
 		eff, perr := r.bk.resolveEffectivePolicy(tx, in.BrandID, sess.LocationID, sess.ID)
@@ -316,7 +318,9 @@ func (r *waitlistRepository) Promote(ctx context.Context, in waitlist.PromoteInp
 		if entry.Status != string(waitlist.StatusWaiting) {
 			return apperr.NewAppError(apperr.ErrWaitlistNotPromotable, "该候补当前不可转正", 409)
 		}
-		if sess.Status != "scheduled" {
+		// Batch 15：in_progress 视同 scheduled（自动状态机仅改显示态，不新增候补/转正门，
+		// 转正实际由容量把关）。否则场次到点自动转 in_progress 后无法再把已候补学员转正。
+		if sess.Status != "scheduled" && sess.Status != "in_progress" {
 			return apperr.NewAppError(apperr.ErrSessionNotBookable, "场次当前不可预约", 409)
 		}
 		eff, perr := r.bk.resolveEffectivePolicy(tx, in.BrandID, sess.LocationID, sess.ID)

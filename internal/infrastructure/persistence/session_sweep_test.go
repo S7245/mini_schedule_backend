@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/zkw/mini-schedule/backend/internal/domain/booking"
+	"github.com/zkw/mini-schedule/backend/internal/domain/waitlist"
 	apperr "github.com/zkw/mini-schedule/backend/pkg/errors"
 )
 
@@ -98,6 +99,43 @@ func TestEndSessionSystem_Idempotent(t *testing.T) {
 	assertAppCode(t, err, apperr.ErrSessionNotEndable)
 	if n := countSystemEndAudit(t, db, f.session); n != 1 {
 		t.Errorf("audit count after重复 = %d, want still 1", n)
+	}
+}
+
+// TestWaitlist_PromoteIntoInProgress Batch 15 回归（code-review F1）：场次自动转 in_progress 后，
+// 已候补学员仍可转正（in_progress 视同 scheduled）。修复前 waitlist Promote 的 `status != scheduled`
+// 守卫会在场次到点自动转 in_progress 后阻断「课已开始、有人腾位、把候补者转正」这一真实工作流。
+func TestWaitlist_PromoteIntoInProgress(t *testing.T) {
+	db := newMigratedTestDB(t)
+	wlRepo := NewWaitlistRepository(db)
+	bkRepo := NewBookingRepository(db)
+	f := bookingSetup(t, db)
+	instr2 := seedInstructor(t, db, f.brandID)
+	sess, bk1 := fullSession(t, db, f, instr2)
+	l2 := seedLearnerProfile(t, db, f.brandID, "wl:ip")
+	grantEnt(t, db, f.brandID, l2, "卡", "class_pack", intp(5), "all", "all", nil, nil)
+	entry, err := wlRepo.Join(context.Background(), waitlist.JoinInput{
+		BrandID: f.brandID, ActorID: f.actor, ClassSessionID: sess, BrandLearnerProfileID: l2,
+	})
+	if err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	// 腾位（场次此时仍 scheduled）。
+	if _, err := bkRepo.Cancel(context.Background(), f.brandID, f.actor, bk1.ID, "腾位"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	// 场次到点自动转 in_progress（starts 过去、ends 未来）。
+	now := time.Now().UTC()
+	setSessionTimesStatus(t, db, sess, now.Add(-10*time.Minute), now.Add(50*time.Minute), "in_progress")
+	// 转正应成功（修复前会被 SESSION_NOT_BOOKABLE 阻断）。
+	got, err := wlRepo.Promote(context.Background(), waitlist.PromoteInput{
+		BrandID: f.brandID, ActorID: f.actor, EntryID: entry.ID, EntitlementMode: "auto",
+	})
+	if err != nil {
+		t.Fatalf("promote into in_progress should succeed (Batch 15 视同 scheduled): %v", err)
+	}
+	if got.Status != waitlist.StatusPromoted || got.PromotedBookingID == nil {
+		t.Fatalf("entry not promoted: %+v", got)
 	}
 }
 

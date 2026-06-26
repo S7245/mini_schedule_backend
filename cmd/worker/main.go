@@ -83,6 +83,7 @@ func main() {
 	}
 	if err := scheduler.Start(); err != nil {
 		log.Error("failed to start asynq scheduler", slog.Any("error", err))
+		srv.Shutdown() // server 已起，优雅收尾再退出
 		os.Exit(1)
 	}
 	log.Info("worker started", slog.String("sweep_cron", sweepCron), slog.Int("concurrency", concurrency))
