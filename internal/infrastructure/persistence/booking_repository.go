@@ -1069,10 +1069,43 @@ func (r *bookingRepository) Attend(ctx context.Context, brandID, actorID, id int
 
 // ---- TX-B 结束场次 ----
 
-// EndSession scheduled|in_progress → completed + 未签到的 booked 批量 → pending_no_show（hold/booked_count 不动）。
+// applyEndSession 结束场次核心（Batch 13e brand_user 路径 + Batch 15 system 路径共用）。
+// 调用方须已在 tx 内 SELECT FOR UPDATE 该 session 行并完成 data_scope 守卫。
+// actor 决定 audit 的 actor_type/actor_id：system 路径 actor.ID=0 → operation_logs.actor_id NULL（无 brand_users FK）。
+// scheduled|in_progress → completed + 未签到 booked 批量 → pending_no_show（hold/booked_count 不动）。
+// 幂等：completed 场次返 SESSION_NOT_ENDABLE。§22.6：只产 pending_no_show，绝不自动 no_show/扣课。
+func applyEndSession(tx *gorm.DB, sess *ClassSessionModel, actor audit.Actor) (*booking.EndSessionResult, error) {
+	if sess.Status != "scheduled" && sess.Status != "in_progress" {
+		return nil, apperr.NewAppError(apperr.ErrSessionNotEndable, "仅可结束未开始或进行中的场次", 409)
+	}
+	if err := tx.Model(&ClassSessionModel{}).Where("id = ?", sess.ID).
+		Update("status", "completed").Error; err != nil {
+		return nil, apperr.ErrInternalF("更新场次状态失败", err)
+	}
+	res := tx.Model(&BookingModel{}).
+		Where("class_session_id = ? AND status = ?", sess.ID, string(booking.StatusBooked)).
+		Update("status", string(booking.StatusPendingNoShow))
+	if res.Error != nil {
+		return nil, apperr.ErrInternalF("批量转待爽约失败", res.Error)
+	}
+	pendingCount := res.RowsAffected
+	bID := sess.BrandID
+	if err := audit.Write(tx, audit.Event{
+		BrandID: &bID,
+		Actor:   actor,
+		Action:  "session_ended",
+		Target:  audit.Target{Type: "class_session", ID: sess.ID},
+		After:   map[string]any{"pending_no_show_count": pendingCount},
+	}); err != nil {
+		return nil, err
+	}
+	return &booking.EndSessionResult{SessionID: sess.ID, Status: "completed", PendingNoShowCount: int(pendingCount)}, nil
+}
+
+// EndSession 手动结束场次（Batch 13e）：actor=brand_user + data_scope 守卫。
 // completed 场次不可再取消（class_session.Cancel 仅允 scheduled/in_progress），故 pending_no_show 永不被 TX-3 触及。
 func (r *bookingRepository) EndSession(ctx context.Context, brandID, actorID, sessionID int64, scopeLocationIDs []int64) (*booking.EndSessionResult, error) {
-	var pendingCount int64
+	var out *booking.EndSessionResult
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var sess ClassSessionModel
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -1086,33 +1119,68 @@ func (r *bookingRepository) EndSession(ctx context.Context, brandID, actorID, se
 		if scopeLocationIDs != nil && !int64InSlice(sess.LocationID, scopeLocationIDs) {
 			return apperr.NewAppError(apperr.ErrSessionNotFound, "场次不存在", 404)
 		}
-		if sess.Status != "scheduled" && sess.Status != "in_progress" {
-			return apperr.NewAppError(apperr.ErrSessionNotEndable, "仅可结束未开始或进行中的场次", 409)
+		res, err := applyEndSession(tx, &sess, audit.Actor{Type: audit.ActorBrandUser, ID: actorID})
+		if err != nil {
+			return err
 		}
-		if err := tx.Model(&ClassSessionModel{}).Where("id = ?", sessionID).
-			Update("status", "completed").Error; err != nil {
-			return apperr.ErrInternalF("更新场次状态失败", err)
-		}
-		res := tx.Model(&BookingModel{}).
-			Where("class_session_id = ? AND status = ?", sessionID, string(booking.StatusBooked)).
-			Update("status", string(booking.StatusPendingNoShow))
-		if res.Error != nil {
-			return apperr.ErrInternalF("批量转待爽约失败", res.Error)
-		}
-		pendingCount = res.RowsAffected
-		bID := brandID
-		return audit.Write(tx, audit.Event{
-			BrandID: &bID,
-			Actor:   audit.Actor{Type: audit.ActorBrandUser, ID: actorID},
-			Action:  "session_ended",
-			Target:  audit.Target{Type: "class_session", ID: sessionID},
-			After:   map[string]any{"pending_no_show_count": pendingCount},
-		})
+		out = res
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &booking.EndSessionResult{SessionID: sessionID, Status: "completed", PendingNoShowCount: int(pendingCount)}, nil
+	return out, nil
+}
+
+// EndSessionSystem 系统自动结束场次（Batch 15）：按 id 锁 session（无 brand 过滤、无 scope，系统跨品牌），
+// 从行读 brand_id，复用 applyEndSession（actor=system）。供 worker periodic sweep 调用，幂等。
+func (r *bookingRepository) EndSessionSystem(ctx context.Context, sessionID int64) (*booking.EndSessionResult, error) {
+	var out *booking.EndSessionResult
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var sess ClassSessionModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ?", sessionID).First(&sess).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.NewAppError(apperr.ErrSessionNotFound, "场次不存在", 404)
+			}
+			return apperr.ErrInternalF("查询场次失败", err)
+		}
+		res, err := applyEndSession(tx, &sess, audit.Actor{Type: audit.ActorSystem})
+		if err != nil {
+			return err
+		}
+		out = res
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MarkSessionsInProgress 批量 scheduled→in_progress（Batch 15）：starts_at<=now<ends_at。
+// 纯显示态、无 audit、幂等（WHERE status='scheduled' 使重跑空操作）。返回受影响行数。
+func (r *bookingRepository) MarkSessionsInProgress(ctx context.Context, now time.Time) (int64, error) {
+	res := r.db.WithContext(ctx).Model(&ClassSessionModel{}).
+		Where("status = ? AND starts_at <= ? AND ends_at > ?", "scheduled", now, now).
+		Update("status", "in_progress")
+	if res.Error != nil {
+		return 0, apperr.ErrInternalF("批量标记进行中失败", res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
+// ListDueSessionIDs 列「到点未结束」场次 id（Batch 15）：status IN(scheduled,in_progress) AND ends_at<=now。
+// 跨品牌系统全局扫描，id 升序。
+func (r *bookingRepository) ListDueSessionIDs(ctx context.Context, now time.Time) ([]int64, error) {
+	var ids []int64
+	if err := r.db.WithContext(ctx).Model(&ClassSessionModel{}).
+		Where("status IN ? AND ends_at <= ?", []string{"scheduled", "in_progress"}, now).
+		Order("id ASC").
+		Pluck("id", &ids).Error; err != nil {
+		return nil, apperr.ErrInternalF("查询到点场次失败", err)
+	}
+	return ids, nil
 }
 
 // ---- TX-C 确认爽约 ----

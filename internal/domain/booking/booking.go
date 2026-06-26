@@ -372,6 +372,16 @@ type Repository interface {
 	// EndSession 单事务 TX-B（Batch 13e）：锁 session→校 scheduled/in_progress→completed→未签到 booked 批量→pending_no_show。
 	// scopeLocationIDs 非 nil 时守卫场次门店（越权 SESSION_NOT_FOUND）。
 	EndSession(ctx context.Context, brandID, actorID, sessionID int64, scopeLocationIDs []int64) (*EndSessionResult, error)
+	// EndSessionSystem 单事务（Batch 15 自动化）：系统版结束场次。按 id 锁 session（跨品牌、无 scope），
+	// 从行读 brand_id，复用 EndSession 的 applyEndSession 核心（actor=system，audit actor_id NULL）。
+	// 幂等：completed 场次返 SESSION_NOT_ENDABLE。§22.6：只产 pending_no_show，绝不自动 no_show/扣课。
+	EndSessionSystem(ctx context.Context, sessionID int64) (*EndSessionResult, error)
+	// MarkSessionsInProgress 批量 scheduled→in_progress（Batch 15 自动化）：
+	// status='scheduled' AND starts_at <= now AND ends_at > now。纯显示态、无 audit、幂等。返回受影响行数。
+	MarkSessionsInProgress(ctx context.Context, now time.Time) (int64, error)
+	// ListDueSessionIDs 列「到点未结束」场次 id（Batch 15 自动化）：
+	// status IN (scheduled,in_progress) AND ends_at <= now。跨品牌（系统全局扫描）。
+	ListDueSessionIDs(ctx context.Context, now time.Time) ([]int64, error)
 	// ConfirmNoShow 单事务 TX-C（Batch 13e）：锁 booking→校 pending_no_show→no_show→按 policy
 	// no_show_consumes_entitlement consume/release hold + session_records(no_show)。data_scope 守卫由 service 完成。
 	ConfirmNoShow(ctx context.Context, brandID, actorID, id int64, reason string) (*Booking, error)

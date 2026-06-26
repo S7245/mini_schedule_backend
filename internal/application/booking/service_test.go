@@ -3,6 +3,7 @@ package booking
 import (
 	"context"
 	"testing"
+	"time"
 
 	domainbooking "github.com/zkw/mini-schedule/backend/internal/domain/booking"
 	domainrbac "github.com/zkw/mini-schedule/backend/internal/domain/rbac"
@@ -53,6 +54,15 @@ func (r *fakeRepo) EndSession(_ context.Context, _, _, sessionID int64, scope []
 	r.endCalled = true
 	r.lastScope = scope
 	return &domainbooking.EndSessionResult{SessionID: sessionID, Status: "completed"}, nil
+}
+func (r *fakeRepo) EndSessionSystem(_ context.Context, sessionID int64) (*domainbooking.EndSessionResult, error) {
+	return &domainbooking.EndSessionResult{SessionID: sessionID, Status: "completed"}, nil
+}
+func (r *fakeRepo) MarkSessionsInProgress(_ context.Context, _ time.Time) (int64, error) {
+	return 0, nil
+}
+func (r *fakeRepo) ListDueSessionIDs(_ context.Context, _ time.Time) ([]int64, error) {
+	return nil, nil
 }
 func (r *fakeRepo) ConfirmNoShow(_ context.Context, _, _, id int64, _ string) (*domainbooking.Booking, error) {
 	r.noShowCalled = true
