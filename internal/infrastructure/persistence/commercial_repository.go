@@ -514,11 +514,21 @@ func (r *commercialRepository) ListSubscriptionsDueForGrace(ctx context.Context,
 	return ids, nil
 }
 
-// TransitionSubscriptionToGrace 系统自动 active→grace_period（Batch 16，镜像 EndSessionSystem）：
-// 按 id 锁行（无 brand 过滤，系统跨品牌）→ 状态守卫（active 且已过期，否则良性 skip）→
-// 置 grace_ends_at = expires_at + graceDays 日历日 → audit(actor=system, actor_id NULL)。
-// 返回 (transitioned, err)：守卫不过 = (false,nil)；DB 错 = (false,err)。
-func (r *commercialRepository) TransitionSubscriptionToGrace(ctx context.Context, id int64, now time.Time, graceDays int) (bool, error) {
+// subscriptionTransitionPlan 是一次系统订阅转换的「做什么」：更新字段 + audit action + after 快照。
+type subscriptionTransitionPlan struct {
+	updates map[string]interface{}
+	action  string
+	after   map[string]any
+}
+
+// applySubscriptionTransition 系统订阅转换公共骨架（Batch 16，镜像 booking.applyEndSession）：
+// 按 id 锁行（无 brand 过滤，系统跨品牌）→ NotFound 良性 skip → plan(sub) 决定是否转换；
+// plan 返回 nil = 守卫不过良性 skip，否则按其 updates/action/after 更新行 + 写 audit(actor=system)。
+// 返回 (transitioned, err)：守卫不过/不存在 = (false,nil)；DB 错 = (false,err)。
+func (r *commercialRepository) applySubscriptionTransition(
+	ctx context.Context, id int64,
+	plan func(sub *BrandSubscriptionModel) *subscriptionTransitionPlan,
+) (bool, error) {
 	transitioned := false
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var sub BrandSubscriptionModel
@@ -529,26 +539,22 @@ func (r *commercialRepository) TransitionSubscriptionToGrace(ctx context.Context
 			}
 			return apperr.ErrInternalF("锁定订阅失败", err)
 		}
-		// 状态守卫（幂等 + 并发：平台已改动则空操作，不覆盖人工权威）。
-		if sub.Status != string(commercial.BrandSubscriptionStatusActive) || sub.ExpiresAt.After(now) {
+		// 状态守卫（幂等 + 并发：平台已改动则 plan 返 nil 空操作，不覆盖人工权威）。
+		p := plan(&sub)
+		if p == nil {
 			return nil
 		}
-		graceEndsAt := sub.ExpiresAt.AddDate(0, 0, graceDays)
-		if err := tx.Model(&BrandSubscriptionModel{}).Where("id = ?", id).
-			Updates(map[string]interface{}{
-				"status":        string(commercial.BrandSubscriptionStatusGracePeriod),
-				"grace_ends_at": graceEndsAt,
-			}).Error; err != nil {
-			return apperr.ErrInternalF("更新订阅为宽限期失败", err)
+		if err := tx.Model(&BrandSubscriptionModel{}).Where("id = ?", id).Updates(p.updates).Error; err != nil {
+			return apperr.ErrInternalF("更新订阅状态失败", err)
 		}
 		bID := sub.BrandID
 		if err := audit.Write(tx, audit.Event{
 			BrandID: &bID,
 			Actor:   audit.Actor{Type: audit.ActorSystem},
-			Action:  "brand_subscription.auto_grace_period",
+			Action:  p.action,
 			Target:  audit.Target{Type: "brand_subscription", ID: id},
 			Before:  map[string]any{"status": sub.Status, "grace_ends_at": sub.GraceEndsAt},
-			After:   map[string]any{"status": string(commercial.BrandSubscriptionStatusGracePeriod), "grace_ends_at": graceEndsAt},
+			After:   p.after,
 		}); err != nil {
 			return err
 		}
@@ -559,6 +565,25 @@ func (r *commercialRepository) TransitionSubscriptionToGrace(ctx context.Context
 		return false, err
 	}
 	return transitioned, nil
+}
+
+// TransitionSubscriptionToGrace 系统自动 active→grace_period（Batch 16）：守卫 active 且已过期，
+// 置 grace_ends_at = expires_at + graceDays 日历日（与 computeSubscriptionExpiry 一致），audit actor=system。
+func (r *commercialRepository) TransitionSubscriptionToGrace(ctx context.Context, id int64, now time.Time, graceDays int) (bool, error) {
+	return r.applySubscriptionTransition(ctx, id, func(sub *BrandSubscriptionModel) *subscriptionTransitionPlan {
+		if sub.Status != string(commercial.BrandSubscriptionStatusActive) || sub.ExpiresAt.After(now) {
+			return nil
+		}
+		graceEndsAt := sub.ExpiresAt.AddDate(0, 0, graceDays)
+		return &subscriptionTransitionPlan{
+			updates: map[string]interface{}{
+				"status":        string(commercial.BrandSubscriptionStatusGracePeriod),
+				"grace_ends_at": graceEndsAt,
+			},
+			action: "brand_subscription.auto_grace_period",
+			after:  map[string]any{"status": string(commercial.BrandSubscriptionStatusGracePeriod), "grace_ends_at": graceEndsAt},
+		}
+	})
 }
 
 // ListSubscriptionsDueForRestricted 列「宽限期满待受限」订阅 id（Batch 16）：
@@ -575,45 +600,20 @@ func (r *commercialRepository) ListSubscriptionsDueForRestricted(ctx context.Con
 	return ids, nil
 }
 
-// TransitionSubscriptionToRestricted 系统自动 grace_period→restricted（Batch 16，镜像 EndSessionSystem）：
-// 锁行 → 守卫（grace_period 且 grace_ends_at 非空且已过，否则良性 skip）→ 置 restricted → audit(system)。
+// TransitionSubscriptionToRestricted 系统自动 grace_period→restricted（Batch 16）：守卫 grace_period
+// 且 grace_ends_at 非空且已过，置 restricted（grace_ends_at 不动，留档），audit actor=system。
 func (r *commercialRepository) TransitionSubscriptionToRestricted(ctx context.Context, id int64, now time.Time) (bool, error) {
-	transitioned := false
-	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var sub BrandSubscriptionModel
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ?", id).First(&sub).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
-				return nil
-			}
-			return apperr.ErrInternalF("锁定订阅失败", err)
-		}
+	return r.applySubscriptionTransition(ctx, id, func(sub *BrandSubscriptionModel) *subscriptionTransitionPlan {
 		if sub.Status != string(commercial.BrandSubscriptionStatusGracePeriod) ||
 			sub.GraceEndsAt == nil || sub.GraceEndsAt.After(now) {
 			return nil
 		}
-		if err := tx.Model(&BrandSubscriptionModel{}).Where("id = ?", id).
-			Update("status", string(commercial.BrandSubscriptionStatusRestricted)).Error; err != nil {
-			return apperr.ErrInternalF("更新订阅为受限失败", err)
+		return &subscriptionTransitionPlan{
+			updates: map[string]interface{}{"status": string(commercial.BrandSubscriptionStatusRestricted)},
+			action:  "brand_subscription.auto_restricted",
+			after:   map[string]any{"status": string(commercial.BrandSubscriptionStatusRestricted), "grace_ends_at": sub.GraceEndsAt},
 		}
-		bID := sub.BrandID
-		if err := audit.Write(tx, audit.Event{
-			BrandID: &bID,
-			Actor:   audit.Actor{Type: audit.ActorSystem},
-			Action:  "brand_subscription.auto_restricted",
-			Target:  audit.Target{Type: "brand_subscription", ID: id},
-			Before:  map[string]any{"status": sub.Status, "grace_ends_at": sub.GraceEndsAt},
-			After:   map[string]any{"status": string(commercial.BrandSubscriptionStatusRestricted), "grace_ends_at": sub.GraceEndsAt},
-		}); err != nil {
-			return err
-		}
-		transitioned = true
-		return nil
 	})
-	if err != nil {
-		return false, err
-	}
-	return transitioned, nil
 }
 
 func (r *commercialRepository) ListPaymentTransactions(ctx context.Context, offset, limit int, filter commercial.ListPaymentTransactionsFilter) ([]*commercial.PaymentTransaction, int64, error) {

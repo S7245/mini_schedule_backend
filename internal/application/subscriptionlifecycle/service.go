@@ -12,8 +12,9 @@ import (
 	"time"
 )
 
-// defaultGraceDays §1334 默认宽限期（可系统配置）。
-const defaultGraceDays = 7
+// DefaultGraceDays §1334 默认宽限期（可系统配置）。NewService 在 graceDays<=0 时兜底用它，
+// cmd/worker 也引用它做启动日志的有效值兜底（单一真源，避免字面量漂移）。
+const DefaultGraceDays = 7
 
 // Repository 订阅生命周期所需的窄接口（commercial.Repository 结构上满足）。
 type Repository interface {
@@ -33,7 +34,7 @@ type Service struct {
 // NewService 构造。graceDays<=0 兜底为 7。log 可为 nil（仅影响单 sub 失败日志）。
 func NewService(repo Repository, graceDays int, log *slog.Logger) *Service {
 	if graceDays <= 0 {
-		graceDays = defaultGraceDays
+		graceDays = DefaultGraceDays
 	}
 	return &Service{repo: repo, graceDays: graceDays, log: log}
 }

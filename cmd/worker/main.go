@@ -50,9 +50,10 @@ func main() {
 	svc := sessionautomation.NewService(persistence.NewBookingRepository(db), log)
 	sweep := worker.NewSweepHandler(svc, log)
 
+	// NewService 内部也兜底 graceDays<=0；这里同样兜底只为启动日志显示有效值（引用同一常量，避免漂移）。
 	graceDays := cfg.Worker.GraceDays
 	if graceDays <= 0 {
-		graceDays = 7
+		graceDays = subscriptionlifecycle.DefaultGraceDays
 	}
 	subSvc := subscriptionlifecycle.NewService(persistence.NewCommercialRepository(db), graceDays, log)
 	subSweep := worker.NewSubscriptionSweepHandler(subSvc, log)
