@@ -194,6 +194,14 @@ type Repository interface {
 	ManualRenewBrandSubscription(ctx context.Context, id int64, input ManualRenewBrandSubscriptionInput) (*BrandSubscription, error)
 	UpdateBrandSubscriptionLimits(ctx context.Context, id int64, input UpdateBrandSubscriptionLimitsInput) (*BrandSubscription, error)
 	UpdateBrandSubscriptionStatus(ctx context.Context, id int64, input UpdateBrandSubscriptionStatusInput) (*BrandSubscription, error)
+
+	// 订阅生命周期自动化（Batch 16，系统执行、无 RBAC、跨品牌）。worker subscription:sweep 调用。
+	// 两段 list 提供待转换 id；两段转换各自锁行 + 状态守卫 + audit(actor=system)，
+	// 守卫不过返 (false,nil) 良性 skip（幂等 + 并发安全），DB 错返 (false,err)。
+	ListSubscriptionsDueForGrace(ctx context.Context, now time.Time) ([]int64, error)
+	TransitionSubscriptionToGrace(ctx context.Context, id int64, now time.Time, graceDays int) (bool, error)
+	ListSubscriptionsDueForRestricted(ctx context.Context, now time.Time) ([]int64, error)
+	TransitionSubscriptionToRestricted(ctx context.Context, id int64, now time.Time) (bool, error)
 	ListPaymentTransactions(ctx context.Context, offset, limit int, filter ListPaymentTransactionsFilter) ([]*PaymentTransaction, int64, error)
 	ListPaymentCallbackLogs(ctx context.Context, offset, limit int, status PaymentCallbackLogStatus) ([]*PaymentCallbackLog, int64, error)
 	ListOperationLogs(ctx context.Context, offset, limit int, filter ListOperationLogsFilter) ([]*OperationLog, int64, error)
