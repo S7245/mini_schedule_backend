@@ -21,6 +21,7 @@ type Config struct {
 	Pagination PaginationConfig `mapstructure:"pagination"`
 	SMS        SMSConfig        `mapstructure:"sms"`
 	Payment    PaymentConfig    `mapstructure:"payment"`
+	Worker     WorkerConfig     `mapstructure:"worker"`
 }
 
 type AppConfig struct {
@@ -108,6 +109,16 @@ type PaymentConfig struct {
 	WeChat WeChatPayConfig `mapstructure:"wechat"`
 }
 
+// WorkerConfig 后台 worker（asynq）配置。Batch 15：场次状态自动化。
+// 仅 cmd/worker 进程读取；asynq 复用 Redis 段连接（RedisClientOpt{Addr,Password,DB}）。
+type WorkerConfig struct {
+	// SweepCron asynq Scheduler 周期，cron 或 "@every 1m" 语法。
+	// 场次时间非秒级敏感，默认每分钟扫一轮。
+	SweepCron string `mapstructure:"sweep_cron"`
+	// Concurrency asynq Server 并发处理 worker 数。
+	Concurrency int `mapstructure:"concurrency"`
+}
+
 type WeChatPayConfig struct {
 	AppID          string `mapstructure:"app_id"`
 	MchID          string `mapstructure:"mch_id"`
@@ -148,6 +159,7 @@ func Load(configPath string) (*Config, error) {
 		"payment.wechat.app_id", "payment.wechat.mch_id", "payment.wechat.api_v3_key",
 		"payment.wechat.serial_no", "payment.wechat.private_key_path", "payment.wechat.notify_url",
 		"payment.wechat.allow_mock",
+		"worker.sweep_cron", "worker.concurrency",
 	}
 	for _, key := range keysToBind {
 		_ = v.BindEnv(key)
