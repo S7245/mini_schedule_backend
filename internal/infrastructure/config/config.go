@@ -115,8 +115,13 @@ type WorkerConfig struct {
 	// SweepCron asynq Scheduler 周期，cron 或 "@every 1m" 语法。
 	// 场次时间非秒级敏感，默认每分钟扫一轮。
 	SweepCron string `mapstructure:"sweep_cron"`
+	// SubscriptionSweepCron 订阅生命周期扫描周期（Batch 16）。
+	// 订阅转换天级粒度（grace 7 天），默认每小时一轮即足够、更轻。空→cmd/worker 兜底 "@every 1h"。
+	SubscriptionSweepCron string `mapstructure:"subscription_sweep_cron"`
 	// Concurrency asynq Server 并发处理 worker 数。
 	Concurrency int `mapstructure:"concurrency"`
+	// GraceDays 默认宽限期天数（Batch 16，§1334 可系统配置）。<=0→subscriptionlifecycle 兜底 7。
+	GraceDays int `mapstructure:"grace_days"`
 }
 
 type WeChatPayConfig struct {
@@ -160,6 +165,7 @@ func Load(configPath string) (*Config, error) {
 		"payment.wechat.serial_no", "payment.wechat.private_key_path", "payment.wechat.notify_url",
 		"payment.wechat.allow_mock",
 		"worker.sweep_cron", "worker.concurrency",
+		"worker.subscription_sweep_cron", "worker.grace_days",
 	}
 	for _, key := range keysToBind {
 		_ = v.BindEnv(key)

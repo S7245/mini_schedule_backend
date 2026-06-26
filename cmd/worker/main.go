@@ -10,14 +10,15 @@ import (
 	"github.com/hibiken/asynq"
 
 	"github.com/zkw/mini-schedule/backend/internal/application/sessionautomation"
+	"github.com/zkw/mini-schedule/backend/internal/application/subscriptionlifecycle"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/config"
 	"github.com/zkw/mini-schedule/backend/internal/infrastructure/persistence"
 	"github.com/zkw/mini-schedule/backend/internal/interfaces/worker"
 )
 
-// cmd/worker：场次状态自动化后台进程（Batch 15）。
-//   - asynq Scheduler 按 worker.sweep_cron 周期 enqueue session:sweep；
-//   - asynq Server 消费并调 sessionautomation.RunSweep。
+// cmd/worker：后台周期任务进程（Batch 15 + 16）。同一 asynq Server 消费两类任务：
+//   - session:sweep（Batch 15）：Scheduler 按 worker.sweep_cron enqueue → sessionautomation.RunSweep；
+//   - subscription:sweep（Batch 16）：按 worker.subscription_sweep_cron enqueue → subscriptionlifecycle.RunSweep。
 //
 // 部署铁律：Scheduler 多副本会重复 enqueue → 本进程须 replicas=1（Railway 第 4 服务）。
 // 本进程不跑 migration（schema 由 api-* 服务负责迁移，避免多进程竞争）。
@@ -49,6 +50,13 @@ func main() {
 	svc := sessionautomation.NewService(persistence.NewBookingRepository(db), log)
 	sweep := worker.NewSweepHandler(svc, log)
 
+	graceDays := cfg.Worker.GraceDays
+	if graceDays <= 0 {
+		graceDays = 7
+	}
+	subSvc := subscriptionlifecycle.NewService(persistence.NewCommercialRepository(db), graceDays, log)
+	subSweep := worker.NewSubscriptionSweepHandler(subSvc, log)
+
 	redisOpt := asynq.RedisClientOpt{
 		Addr:     cfg.Redis.Addr,
 		Password: cfg.Redis.Password,
@@ -63,6 +71,10 @@ func main() {
 	if sweepCron == "" {
 		sweepCron = "@every 1m"
 	}
+	subSweepCron := cfg.Worker.SubscriptionSweepCron
+	if subSweepCron == "" {
+		subSweepCron = "@every 1h"
+	}
 
 	srv := asynq.NewServer(redisOpt, asynq.Config{
 		Concurrency: concurrency,
@@ -70,10 +82,15 @@ func main() {
 	})
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(worker.TaskSessionSweep, sweep.Handle)
+	mux.HandleFunc(worker.TaskSubscriptionSweep, subSweep.Handle)
 
 	scheduler := asynq.NewScheduler(redisOpt, &asynq.SchedulerOpts{LogLevel: asynq.InfoLevel})
 	if _, err := scheduler.Register(sweepCron, worker.NewSweepTask()); err != nil {
 		log.Error("failed to register sweep schedule", slog.String("cron", sweepCron), slog.Any("error", err))
+		os.Exit(1)
+	}
+	if _, err := scheduler.Register(subSweepCron, worker.NewSubscriptionSweepTask()); err != nil {
+		log.Error("failed to register subscription sweep schedule", slog.String("cron", subSweepCron), slog.Any("error", err))
 		os.Exit(1)
 	}
 
@@ -86,7 +103,11 @@ func main() {
 		srv.Shutdown() // server 已起，优雅收尾再退出
 		os.Exit(1)
 	}
-	log.Info("worker started", slog.String("sweep_cron", sweepCron), slog.Int("concurrency", concurrency))
+	log.Info("worker started",
+		slog.String("sweep_cron", sweepCron),
+		slog.String("subscription_sweep_cron", subSweepCron),
+		slog.Int("grace_days", graceDays),
+		slog.Int("concurrency", concurrency))
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

@@ -69,4 +69,6 @@ payment:
 # Batch 15：后台 worker（asynq）。仅 cmd/worker 进程读取，复用上面的 redis 段连接。
 worker:
   sweep_cron: "@every 1m"   # 场次状态扫描周期（cron / @every 语法）
+  subscription_sweep_cron: "@every 1h"   # 订阅生命周期扫描周期（天级粒度，小时足够）
   concurrency: 4            # asynq Server 并发 worker 数
+  grace_days: 7             # 默认宽限期天数（§1334 可系统配置；env 覆盖）
