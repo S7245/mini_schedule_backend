@@ -16,15 +16,16 @@ import (
 	"github.com/zkw/mini-schedule/backend/internal/application/brandprofile"
 	appClassSession "github.com/zkw/mini-schedule/backend/internal/application/classsession"
 	commercialapp "github.com/zkw/mini-schedule/backend/internal/application/commercial"
-	appEntitlement "github.com/zkw/mini-schedule/backend/internal/application/entitlement"
 	appCourseCategory "github.com/zkw/mini-schedule/backend/internal/application/coursecategory"
 	appCourseTemplate "github.com/zkw/mini-schedule/backend/internal/application/coursetemplate"
+	appEntitlement "github.com/zkw/mini-schedule/backend/internal/application/entitlement"
 	appLearner "github.com/zkw/mini-schedule/backend/internal/application/learner"
 	appLocation "github.com/zkw/mini-schedule/backend/internal/application/location"
 	appLocationResource "github.com/zkw/mini-schedule/backend/internal/application/locationresource"
 	appOnboarding "github.com/zkw/mini-schedule/backend/internal/application/onboarding"
 	"github.com/zkw/mini-schedule/backend/internal/application/rbac"
 	appRecurring "github.com/zkw/mini-schedule/backend/internal/application/recurringschedule"
+	appReport "github.com/zkw/mini-schedule/backend/internal/application/report"
 	appStaff "github.com/zkw/mini-schedule/backend/internal/application/staff"
 	"github.com/zkw/mini-schedule/backend/internal/application/training"
 	"github.com/zkw/mini-schedule/backend/internal/application/user"
@@ -111,6 +112,8 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		persistence.NewBookingRepository,
 		// Batch 13d
 		persistence.NewWaitlistRepository,
+		// Batch 17
+		persistence.NewReportRepository,
 
 		// Batch 6/11 — RBAC checker + 各 service 的本地 PermissionChecker 接口绑定
 		provideRBACChecker,
@@ -127,6 +130,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		wire.Bind(new(appEntitlement.PermissionChecker), new(*rbac.Checker)),
 		wire.Bind(new(appBooking.PermissionChecker), new(*rbac.Checker)),
 		wire.Bind(new(appWaitlist.PermissionChecker), new(*rbac.Checker)),
+		wire.Bind(new(appReport.PermissionChecker), new(*rbac.Checker)),
 
 		// 应用服务
 		brand.NewService,
@@ -149,6 +153,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		appEntitlement.NewService,
 		appBooking.NewService,
 		appWaitlist.NewService,
+		appReport.NewService,
 
 		// Handler
 		brandHandler.NewHandler,
@@ -166,6 +171,7 @@ func initializeBrandApp(cfg *config.Config, log *slog.Logger) (*gin.Engine, func
 		brandHandler.NewEntitlementHandler,
 		brandHandler.NewBookingHandler,
 		brandHandler.NewWaitlistHandler,
+		brandHandler.NewReportHandler,
 		providePublicHandler,
 
 		// 路由

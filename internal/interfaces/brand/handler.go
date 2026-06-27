@@ -59,6 +59,9 @@ type Handler struct {
 
 	// Batch 13d — 候补
 	waitlist *WaitlistHandler
+
+	// Batch 17 — 基础运营看板
+	report *ReportHandler
 }
 
 // NewHandler 创建品牌 Handler
@@ -82,6 +85,7 @@ func NewHandler(
 	entitlement *EntitlementHandler,
 	booking *BookingHandler,
 	waitlist *WaitlistHandler,
+	report *ReportHandler,
 ) *Handler {
 	return &Handler{
 		brandSvc:          brandSvc,
@@ -104,6 +108,7 @@ func NewHandler(
 		entitlement:       entitlement,
 		booking:           booking,
 		waitlist:          waitlist,
+		report:            report,
 	}
 }
 
@@ -154,6 +159,9 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		}
 		if h.waitlist != nil {
 			h.waitlist.RegisterRoutes(auth)
+		}
+		if h.report != nil {
+			h.report.RegisterRoutes(auth)
 		}
 
 		// Batch 4 — 品牌资料 / onboarding / 门店
